@@ -1,6 +1,7 @@
 import { addScanDir, aiAvailable, apiKeyStatus, archiveItem, cancelImport, canonicalVerbs, classifyAll, isOnboarded, listAllTags, listArchived, listDeleted, listDuplicates, listItemTags, listItems, listScanDirs, listUncanonicalVerbs, listVerbMap, recentActivity, restoreDeleted, runImport, setApiKey, setOnboarded } from "./api";
 import { cancelBtn, classifyBtn, dashboardEl, deployEl, detailEl, dupesEl, emptyEl, importBtn, listEl, modebarEl, searchEl, statusEl } from "./dom";
 import { S, type View, itemById } from "./state";
+import { router } from "./router";
 import { esc } from "./util";
 import { renderArchived, renderDeleted, renderList, renderSelbar } from "./views/browse";
 import { renderDashboard } from "./views/dashboard";
@@ -341,6 +342,13 @@ export async function maybeOnboard() {
     closeDetail();
   });
 }
+
+// Register shell functions in the router BEFORE the first load, so views can
+// call back into the app shell without importing main.ts (avoids import cycles).
+router.renderMain = renderMain;
+router.goToView = goToView;
+router.load = load;
+router.openSettings = openSettings;
 
 load()
   .then(() => maybeOnboard())

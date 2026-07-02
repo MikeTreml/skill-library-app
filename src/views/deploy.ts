@@ -1,6 +1,6 @@
 import { deployStatus, listConflicts, pullFromLocation, pushAllToLocation, pushToLocation } from "../api";
+import { router } from "../router";
 import { deployEl, statusEl } from "../dom";
-import { load } from "../main";
 import { S } from "../state";
 import { esc } from "../util";
 
@@ -71,7 +71,7 @@ export async function renderDeploy() {
     try {
       if (keepLibrary) await pushToLocation(pid);
       else await pullFromLocation(pid);
-      await load();
+      await router.load();
       renderDeploy();
       statusEl.textContent = keepLibrary ? "Kept library version." : "Kept deployed version.";
     } catch (e) {
@@ -88,7 +88,7 @@ export async function renderDeploy() {
       statusEl.textContent = "Pushing all…";
       try {
         const [pushed, conflicts, ok] = await pushAllToLocation(Number(b.dataset.loc));
-        await load();
+        await router.load();
         renderDeploy();
         statusEl.textContent =
           `Pushed ${pushed} item(s)` +

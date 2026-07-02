@@ -1,6 +1,6 @@
 import { type MergeResult, type RefineResult, addItemTag, applyRefinement, applyRefinementAsNew, archiveItem, classifyAll, deleteItems, exportItems, getItemContent, hasRefineBackup, itemSync, markUsed, mergeItems, pullFromLocation, pushToLocation, readPlacement, refineItem, removeItemTag, revertRefine, saveMerge } from "../api";
+import { router } from "../router";
 import { detailEl, statusEl } from "../dom";
-import { load, renderMain } from "../main";
 import { S, itemById } from "../state";
 import { esc } from "../util";
 import { chips } from "./browse";
@@ -27,14 +27,14 @@ export function closeDetail() {
   S.selectedId = null;
   detailEl.hidden = true;
   detailEl.innerHTML = "";
-  renderMain();
+  router.renderMain();
 }
 
 export async function openDetail(id: number) {
   const it = itemById(id) ?? S.archivedItems.find((i) => i.id === id);
   if (!it) return;
   S.selectedId = id;
-  renderMain();
+  router.renderMain();
   detailEl.hidden = false;
   detailEl.innerHTML =
     `<div class="detail-head"><div class="detail-title"><span class="badge ${it.item_type}">${it.item_type}</span><b>${esc(it.name)}</b></div>` +
@@ -61,7 +61,7 @@ export async function openDetail(id: number) {
     if (!confirm("Revert to the version before the last refine? (You can toggle back.)")) return;
     try {
       await revertRefine(id);
-      await load();
+      await router.load();
       openDetail(id); // re-render with restored content
       statusEl.textContent = "Reverted last refine.";
     } catch (e) {
@@ -71,7 +71,7 @@ export async function openDetail(id: number) {
   document.getElementById("detail-used")!.addEventListener("click", async () => {
     try {
       await markUsed(id);
-      await load();
+      await router.load();
       const it2 = itemById(id);
       statusEl.textContent = it2 ? `Marked used (${it2.use_count}× total).` : "Marked used.";
     } catch (e) {
@@ -81,7 +81,7 @@ export async function openDetail(id: number) {
   document.getElementById("detail-archive")!.addEventListener("click", async () => {
     await archiveItem(id, true);
     closeDetail();
-    await load();
+    await router.load();
     statusEl.textContent = "Archived.";
   });
   renderTagPanel(id);
@@ -116,7 +116,7 @@ export function renderTagPanel(id: number) {
     if (!t) return;
     try {
       await addItemTag(id, t);
-      await load();
+      await router.load();
       if (S.selectedId === id) renderTagPanel(id);
       statusEl.textContent = `Tagged #${t.toLowerCase()}`;
     } catch (e) {
@@ -131,7 +131,7 @@ export function renderTagPanel(id: number) {
     b.addEventListener("click", async () => {
       try {
         await removeItemTag(id, b.dataset.tag!);
-        await load();
+        await router.load();
         if (S.selectedId === id) renderTagPanel(id);
       } catch (e) {
         statusEl.textContent = `Error: ${e}`;
@@ -185,7 +185,7 @@ export async function onSyncAction(id: number, pid: number, act: string) {
       statusEl.textContent = "Pushed library → location (original backed up).";
     } else if (act === "pull") {
       await pullFromLocation(pid);
-      await load();
+      await router.load();
       statusEl.textContent = "Pulled location → library (original backed up).";
     }
     await renderSyncPanel(id);
@@ -258,7 +258,7 @@ export function showRefineDiff(id: number, name: string, res: RefineResult) {
   document.getElementById("rf-save")!.addEventListener("click", async () => {
     try {
       await applyRefinement(id, res.proposed);
-      await load();
+      await router.load();
       openDetail(id);
       statusEl.textContent = "Refinement saved (original backed up).";
     } catch (e) {
@@ -269,7 +269,7 @@ export function showRefineDiff(id: number, name: string, res: RefineResult) {
     const nm = (document.getElementById("rf-name") as HTMLInputElement).value.trim() || `${name} (refined)`;
     try {
       const newId = await applyRefinementAsNew(id, res.proposed, nm);
-      await load();
+      await router.load();
       openDetail(newId);
       statusEl.textContent = "Saved as a new item (original kept).";
     } catch (e) {
@@ -347,7 +347,7 @@ export function reviewBatch(proposals: BatchProposal[], idx: number) {
     S.selection.clear();
     detailEl.hidden = true;
     detailEl.innerHTML = "";
-    load().then(() => (statusEl.textContent = `Batch refactor complete (${proposals.length} reviewed).`));
+    router.load().then(() => (statusEl.textContent = `Batch refactor complete (${proposals.length} reviewed).`));
     return;
   }
   const p = proposals[idx];
@@ -403,13 +403,13 @@ export function showMergeReview(ids: number[], mode: MergeMode, res: MergeResult
     try {
       const newId = await saveMerge(ids, res.proposed, name, mode);
       S.selection.clear();
-      await load();
+      await router.load();
       openDetail(newId);
       statusEl.textContent = del
         ? "Merged; sources deleted (restore from the Deleted view)."
         : "Merged into a new item.";
     } catch (e) {
-      await load(); // reflect any partial progress (e.g. some sources already deleted)
+      await router.load(); // reflect any partial progress (e.g. some sources already deleted)
       const st = document.getElementById("mg-status");
       if (st) st.textContent = `Error: ${e}`;
       statusEl.textContent = `Error: ${e}`;
@@ -421,7 +421,7 @@ export async function archiveSelected() {
   const ids = [...S.selection];
   for (const id of ids) await archiveItem(id, true);
   S.selection.clear();
-  await load();
+  await router.load();
   statusEl.textContent = `Archived ${ids.length} item(s).`;
 }
 
@@ -449,10 +449,10 @@ export async function deleteSelected() {
   try {
     await deleteItems(ids);
     S.selection.clear();
-    await load();
+    await router.load();
     statusEl.textContent = `Deleted ${ids.length} item(s) — restore from the Deleted view.`;
   } catch (e) {
-    await load(); // reflect any partial progress
+    await router.load(); // reflect any partial progress
     statusEl.textContent = `Error: ${e}`;
   }
 }
@@ -468,7 +468,7 @@ export async function classifySelected() {
   try {
     const s = await classifyAll(ids);
     S.selection.clear();
-    await load();
+    await router.load();
     statusEl.textContent = `Classified ${s.classified} selected`;
   } catch (e) {
     statusEl.textContent = `Error: ${e}`;

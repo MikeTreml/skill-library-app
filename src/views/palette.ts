@@ -1,6 +1,6 @@
 import { type Item } from "../api";
+import { router } from "../router";
 import { classifyBtn, importBtn, paletteBtn, paletteEl, paletteInputEl, paletteResultsEl } from "../dom";
-import { goToView, openSettings } from "../main";
 import { S } from "../state";
 import { esc, fuzzyScore } from "../util";
 import { exportSelected, openDetail, startBatchRefine, startMerge } from "./detail";
@@ -10,14 +10,14 @@ export type PaletteAction = { label: string; hint?: string; run: () => void };
 
 export function paletteActions(): PaletteAction[] {
   const acts: PaletteAction[] = [
-    { label: "Go to Dashboard", run: () => goToView("dashboard") },
-    { label: "Go to Browse", run: () => goToView("library") },
-    { label: "Go to Triage", hint: `${S.dupGroups.length} cluster(s)`, run: () => goToView("duplicates") },
-    { label: "Go to Deploy", run: () => goToView("deploy") },
-    { label: "Go to Archived", hint: `${S.archivedItems.length}`, run: () => goToView("archived") },
-    { label: "Go to Deleted", hint: `${S.deletedItems.length}`, run: () => goToView("deleted") },
+    { label: "Go to Dashboard", run: () => router.goToView("dashboard") },
+    { label: "Go to Browse", run: () => router.goToView("library") },
+    { label: "Go to Triage", hint: `${S.dupGroups.length} cluster(s)`, run: () => router.goToView("duplicates") },
+    { label: "Go to Deploy", run: () => router.goToView("deploy") },
+    { label: "Go to Archived", hint: `${S.archivedItems.length}`, run: () => router.goToView("archived") },
+    { label: "Go to Deleted", hint: `${S.deletedItems.length}`, run: () => router.goToView("deleted") },
     { label: "Scan & import", run: () => importBtn.click() },
-    { label: "Open Settings", run: () => openSettings() },
+    { label: "Open Settings", run: () => router.openSettings() },
     { label: "Export selected items", hint: `${S.selection.size} selected`, run: () => exportSelected() },
     { label: "Batch refactor selected", hint: `${S.selection.size} selected`, run: () => startBatchRefine() },
   ];

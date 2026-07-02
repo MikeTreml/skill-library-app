@@ -1,6 +1,6 @@
 import { type ItemType, addScanDir, addSynonym, listScanDirs, listVerbMap, removeScanDir, removeSynonym, renormalizeVerbs } from "../api";
+import { router } from "../router";
 import { filtersEl, sourcesEl, statusEl, verbmapEl } from "../dom";
-import { goToView, load, renderMain } from "../main";
 import { S, type TypeFilter } from "../state";
 import { esc } from "../util";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -52,19 +52,19 @@ export function renderFilters() {
       S.typeFilter = b.dataset.type as TypeFilter;
       S.cursorIdx = 0;
       renderFilters();
-      renderMain();
+      router.renderMain();
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-object]"))
     b.addEventListener("click", () => {
       S.objectFilter = b.dataset.object === "" ? null : b.dataset.object!;
       S.cursorIdx = 0;
-      goToView("library");
+      router.goToView("library");
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-tag]"))
     b.addEventListener("click", () => {
       S.tagFilter = b.dataset.tag === "" ? null : b.dataset.tag!;
       S.cursorIdx = 0;
-      goToView("library");
+      router.goToView("library");
     });
   const objTree = document.getElementById("obj-tree") as HTMLDetailsElement | null;
   if (objTree) objTree.addEventListener("toggle", () => (S.objectsTreeOpen = objTree.open));
@@ -158,7 +158,7 @@ export function renderVerbMap() {
   document.getElementById("vrenorm")!.addEventListener("click", async () => {
     try {
       const n = await renormalizeVerbs();
-      await load();
+      await router.load();
       statusEl.textContent = `Re-normalized ${n} item verb(s) through the verb map.`;
     } catch (e) {
       statusEl.textContent = `Error: ${e}`;
@@ -181,7 +181,7 @@ export function renderVerbMap() {
       try {
         await addSynonym(canonical, verb);
         const n = await renormalizeVerbs();
-        await load();
+        await router.load();
         statusEl.textContent = `Promoted "${verb}" → ${canonical}; re-normalized ${n} item verb(s).`;
       } catch (e) {
         statusEl.textContent = `Error: ${e}`;

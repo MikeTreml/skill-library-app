@@ -1,6 +1,6 @@
 import { type Item } from "../api";
+import { router } from "../router";
 import { dupesEl, emptyEl, listEl, paletteEl, selbarEl, statusEl } from "../dom";
-import { renderMain } from "../main";
 import { S } from "../state";
 import { esc } from "../util";
 import { archiveSelected, classifySelected, deleteSelected, exportSelected, openDetail, startBatchRefine, startMerge } from "./detail";
@@ -73,7 +73,7 @@ export function renderSelbar() {
   document.getElementById("del")!.addEventListener("click", deleteSelected);
   document.getElementById("clr")!.addEventListener("click", () => {
     S.selection.clear();
-    renderMain();
+    router.renderMain();
   });
 }
 

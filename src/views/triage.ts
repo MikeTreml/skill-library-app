@@ -1,6 +1,6 @@
 import { dismissCluster as dismissClusterApi, type DupGroup, type Item } from "../api";
+import { router } from "../router";
 import { dupesEl, statusEl } from "../dom";
-import { renderMain } from "../main";
 import { S, itemById } from "../state";
 import { esc } from "../util";
 import { itemRow } from "./browse";
@@ -10,7 +10,7 @@ import { startMerge } from "./detail";
 // `dismissed_clusters` DB table (see dismissCluster below and
 // commands::dismiss_cluster) — the backend is now the source of truth and
 // `list_duplicates` already filters dismissed clusters server-side, so this
-// Set only smooths the UI between a click and the next `load()`.
+// Set only smooths the UI between a click and the next `router.load()`.
 export const dismissedKeys = new Set<string>();
 export let triageIndex = 0;
 
@@ -79,19 +79,19 @@ export function mergeCluster(key: string) {
   if (!g) return;
   S.selection.clear();
   for (const id of g.item_ids) S.selection.add(id);
-  renderMain();
+  router.renderMain();
   startMerge("create");
 }
 
 export function dismissCluster(key: string) {
   // Optimistic UI: hide immediately, then persist. `S.dupGroups` (the source list)
-  // is also refreshed on next `load()` since the backend now filters dismissed
+  // is also refreshed on next `router.load()` since the backend now filters dismissed
   // clusters out of `list_duplicates` itself — this local Set just avoids a
   // flash/round-trip before that refresh happens.
   dismissedKeys.add(key);
   const clusters = visibleClusters();
   if (triageIndex >= clusters.length) triageIndex = Math.max(0, clusters.length - 1);
-  renderMain();
+  router.renderMain();
   dismissClusterApi(key).catch((e: unknown) => {
     statusEl.textContent = `Error persisting dismiss: ${e}`;
   });

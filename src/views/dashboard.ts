@@ -1,5 +1,5 @@
 import { classifyBtn, dashboardEl, importBtn } from "../dom";
-import { goToView } from "../main";
+import { router } from "../router";
 import { S } from "../state";
 import { esc } from "../util";
 
@@ -74,8 +74,8 @@ export function renderDashboard() {
 
   document.getElementById("dash-import")!.addEventListener("click", () => importBtn.click());
   document.getElementById("dash-classify")!.addEventListener("click", () => classifyBtn.click());
-  document.getElementById("dash-triage")!.addEventListener("click", () => goToView("duplicates"));
+  document.getElementById("dash-triage")!.addEventListener("click", () => router.goToView("duplicates"));
   for (const b of dashboardEl.querySelectorAll<HTMLButtonElement>(".dash-review"))
-    b.addEventListener("click", () => goToView("duplicates"));
+    b.addEventListener("click", () => router.goToView("duplicates"));
 }
 
