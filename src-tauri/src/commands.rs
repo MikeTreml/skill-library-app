@@ -152,7 +152,7 @@ pub async fn refine_item(
     tools_add: Vec<String>,
     tools_remove: Vec<String>,
 ) -> Result<RefineResult, String> {
-    let api_key = ai::api_key().ok_or("OPENAI_API_KEY is not set")?;
+    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     let path = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::item_library_path(&conn, id).map_err(|e| e.to_string())?
@@ -194,7 +194,7 @@ pub struct MergeResult {
 
 #[tauri::command]
 pub async fn merge_items(state: State<'_, AppState>, ids: Vec<i64>) -> Result<MergeResult, String> {
-    let api_key = ai::api_key().ok_or("OPENAI_API_KEY is not set")?;
+    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     let metas: Vec<(i64, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let items = db::list_items(&conn).map_err(|e| e.to_string())?;
@@ -360,6 +360,11 @@ pub fn save_merge(
         }
         _ => {}
     }
+    let _ = db::log_activity(
+        &conn,
+        "merge",
+        &format!("Merged {} source(s) into \"{}\" ({})", ids.len(), name, mode),
+    );
     Ok(id)
 }
 
@@ -396,6 +401,9 @@ pub fn delete_items(state: State<AppState>, ids: Vec<i64>) -> Result<(), String>
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     for id in &ids {
         tombstone_item(&conn, &state.library_root, *id)?;
+    }
+    if !ids.is_empty() {
+        let _ = db::log_activity(&conn, "delete", &format!("Deleted {} item(s)", ids.len()));
     }
     Ok(())
 }
@@ -477,6 +485,88 @@ pub fn item_sync(state: State<AppState>, id: i64) -> Result<Vec<crate::model::Pl
             }
         })
         .collect())
+}
+
+/// Deploy mode "map view": one row per location with counts of in_sync / drifted /
+/// missing placements, computed fresh (recomputes each placement's status against
+/// its item's current canonical hash — same status derivation `item_sync` uses,
+/// just aggregated instead of per-item).
+#[tauri::command]
+pub fn deploy_status(state: State<AppState>) -> Result<Vec<crate::model::LocationDeployStatus>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let rows = db::all_placements_with_hash(&conn).map_err(|e| e.to_string())?;
+
+    let mut by_location: std::collections::BTreeMap<i64, (String, String, u32, u32, u32)> =
+        std::collections::BTreeMap::new();
+    for (_pid, loc_id, label, root, rel, canonical_hash) in rows {
+        let abs = placement_abs(&root, &rel);
+        let status = sync_status(&canonical_hash, &abs);
+        let entry = by_location
+            .entry(loc_id)
+            .or_insert_with(|| (label.clone(), root.clone(), 0, 0, 0));
+        match status.as_str() {
+            "in_sync" => entry.2 += 1,
+            "missing" => entry.4 += 1,
+            _ => entry.3 += 1, // drifted or error
+        }
+    }
+
+    Ok(by_location
+        .into_iter()
+        .map(|(location_id, (label, root_path, in_sync, drifted, missing))| {
+            crate::model::LocationDeployStatus {
+                location_id,
+                label,
+                root_path,
+                in_sync,
+                drifted,
+                missing,
+                total: in_sync + drifted + missing,
+            }
+        })
+        .collect())
+}
+
+/// The Deploy-mode "conflict inbox": placements where BOTH the library copy and the
+/// on-disk deployed copy diverged from the last-common-sync baseline (`location_hash`),
+/// and now differ from each other — so neither a plain push nor pull is safe. The user
+/// resolves each by explicitly choosing a side (push_to_location / pull_from_location).
+#[tauri::command]
+pub fn list_conflicts(state: State<AppState>) -> Result<Vec<crate::model::Conflict>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let rows = db::placements_for_conflict_check(&conn).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for (pid, label, root, rel, canonical, baseline) in rows {
+        let abs = placement_abs(&root, &rel);
+        if !abs.exists() {
+            continue; // missing target isn't a 3-way conflict (handled by normal sync)
+        }
+        let disk = match crate::hash::hash_path(&abs) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        // 3-way conflict: disk changed from baseline, library changed from baseline,
+        // and the two now disagree. If either side still matches the baseline, a plain
+        // pull or push resolves it cleanly — not a conflict.
+        if is_three_way_conflict(&baseline, &canonical, &disk) {
+            let (item_id, _, _) = db::placement_paths(&conn, pid).map_err(|e| e.to_string())?;
+            let item_name = db::item_name(&conn, item_id).map_err(|e| e.to_string())?;
+            out.push(crate::model::Conflict {
+                placement_id: pid,
+                item_name,
+                location_label: label,
+                abs_path: abs.to_string_lossy().to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// True when both the library copy and the deployed copy diverged from the last-common
+/// baseline AND now differ from each other — the only case where neither a plain push
+/// nor pull is safe. Pure decision (no I/O), so it's unit-testable in isolation.
+fn is_three_way_conflict(baseline: &str, library: &str, disk: &str) -> bool {
+    library != baseline && disk != baseline && library != disk
 }
 
 #[tauri::command]
@@ -711,8 +801,50 @@ fn opt_str(s: &str) -> Option<&str> {
 }
 
 #[tauri::command]
-pub fn ai_available() -> bool {
-    ai::api_key().is_some()
+pub fn ai_available(state: State<AppState>) -> bool {
+    resolve_api_key(&state).is_some()
+}
+
+/// Resolve the OpenAI API key: prefer the in-app stored key (settings table),
+/// falling back to the OPENAI_API_KEY environment variable. Returns None if neither
+/// is present/non-empty.
+pub fn resolve_api_key(state: &AppState) -> Option<String> {
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(Some(k)) = db::get_setting(&conn, "openai_api_key") {
+            let k = k.trim().to_string();
+            if !k.is_empty() {
+                return Some(k);
+            }
+        }
+    }
+    ai::api_key()
+}
+
+/// Store (or update) the in-app OpenAI API key. Empty input clears the stored key.
+#[tauri::command]
+pub fn set_api_key(state: State<AppState>, key: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        db::delete_setting(&conn, "openai_api_key").map_err(|e| e.to_string())?;
+        let _ = db::log_activity(&conn, "settings", "Cleared stored API key");
+    } else {
+        db::set_setting(&conn, "openai_api_key", trimmed).map_err(|e| e.to_string())?;
+        let _ = db::log_activity(&conn, "settings", "Updated stored API key");
+    }
+    Ok(())
+}
+
+/// Whether a key is stored in-app (settings table) and whether the env var is set,
+/// so the Settings UI can show the source without ever exposing the secret itself.
+#[tauri::command]
+pub fn api_key_status(state: State<AppState>) -> Result<(bool, bool), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let stored = db::get_setting(&conn, "openai_api_key")
+        .map_err(|e| e.to_string())?
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    Ok((stored, ai::api_key().is_some()))
 }
 
 /// Classify items. `ids = None` → all unclassified; `Some(list)` → exactly those.
@@ -724,7 +856,7 @@ pub async fn classify_all(
     ids: Option<Vec<i64>>,
 ) -> Result<ClassifySummary, String> {
     use tauri::Emitter;
-    let api_key = ai::api_key().ok_or("OPENAI_API_KEY is not set")?;
+    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     // Scope the guard to this block so it is dropped before the await loop (not Send).
     let (todo, verb_map): (Vec<(i64, String, String)>, std::collections::HashMap<String, String>) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -802,7 +934,175 @@ pub fn remove_scan_dir(state: State<AppState>, id: i64) -> Result<(), String> {
 pub fn list_duplicates(state: State<AppState>) -> Result<Vec<crate::dedup::DupGroup>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let items = db::list_items(&conn).map_err(|e| e.to_string())?;
-    Ok(crate::dedup::group_duplicates(&items))
+    let dismissed = db::list_dismissed_clusters(&conn).map_err(|e| e.to_string())?;
+    Ok(crate::dedup::group_duplicates(&items)
+        .into_iter()
+        .filter(|g| !dismissed.contains(&g.key))
+        .collect())
+}
+
+/// Persistently dismiss a Triage cluster ("not actually a duplicate") so it survives
+/// app restarts — the durable follow-up to the session-only client-side dismiss.
+#[tauri::command]
+pub fn dismiss_cluster(state: State<AppState>, cluster_key: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::dismiss_cluster(&conn, &cluster_key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn undismiss_cluster(state: State<AppState>, cluster_key: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::undismiss_cluster(&conn, &cluster_key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_dismissed_clusters(state: State<AppState>) -> Result<Vec<String>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Ok(db::list_dismissed_clusters(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect())
+}
+
+// ---- user-defined tags ----
+
+#[tauri::command]
+pub fn add_item_tag(state: State<AppState>, id: i64, tag: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::add_item_tag(&conn, id, &tag).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_item_tag(state: State<AppState>, id: i64, tag: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::remove_item_tag(&conn, id, &tag).map_err(|e| e.to_string())
+}
+
+/// (item_id, tag) pairs for building an id→tags map on the frontend.
+#[tauri::command]
+pub fn list_item_tags(state: State<AppState>) -> Result<Vec<(i64, String)>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_item_tags(&conn).map_err(|e| e.to_string())
+}
+
+/// Distinct tag names with item counts, for the sidebar tag filter.
+#[tauri::command]
+pub fn list_all_tags(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_all_tags(&conn).map_err(|e| e.to_string())
+}
+
+/// Verbs currently on items that are NOT one of the 13 canonical verbs — the
+/// verb-governance UI lists these (with counts) so the user can promote one by
+/// mapping it to a canonical verb (add_synonym) or adopting it as a new
+/// canonical (add_synonym with itself as canonical). Case-insensitive check.
+#[tauri::command]
+pub fn list_uncanonical_verbs(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let all = db::distinct_verbs_with_counts(&conn).map_err(|e| e.to_string())?;
+    Ok(all
+        .into_iter()
+        .filter(|(v, _)| {
+            !crate::taxonomy::CANONICAL_VERBS
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(v))
+        })
+        .collect())
+}
+
+/// The 13 canonical verbs, for the "promote to" dropdown in the governance UI.
+#[tauri::command]
+pub fn canonical_verbs() -> Vec<&'static str> {
+    crate::taxonomy::CANONICAL_VERBS.to_vec()
+}
+
+/// Recent activity-log entries for the Dashboard feed: (id, kind, summary, created_at).
+#[tauri::command]
+pub fn recent_activity(state: State<AppState>) -> Result<Vec<(i64, String, String, String)>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::recent_activity(&conn, 30).map_err(|e| e.to_string())
+}
+
+/// Export the selected items' library folders into a single `.tar.gz` at `dest_path`,
+/// each under a top-level directory named by the item's slug (a shareable bundle
+/// that another machine can drop into a scan dir and re-import). Read-only on the
+/// library; never mutates source or library files. Returns the number of items written.
+#[tauri::command]
+pub fn export_items(state: State<AppState>, ids: Vec<i64>, dest_path: String) -> Result<usize, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if ids.is_empty() {
+        return Err("No items selected to export.".into());
+    }
+    let mut paths = Vec::new();
+    for id in &ids {
+        paths.push(db::item_library_path(&conn, *id).map_err(|e| e.to_string())?);
+    }
+    let written = write_export_archive(&paths, Path::new(&dest_path))?;
+    let _ = db::log_activity(&conn, "export", &format!("Exported {written} item(s) to {dest_path}"));
+    Ok(written)
+}
+
+/// Testable core of `export_items`: write each existing library path (file or folder)
+/// into a gzipped tar at `dest`, under a top-level entry named by the path's own
+/// basename. Returns how many existing paths were written (missing paths skipped).
+fn write_export_archive(lib_paths: &[String], dest: &Path) -> Result<usize, String> {
+    use flate2::{write::GzEncoder, Compression};
+    let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut tar = tar::Builder::new(GzEncoder::new(file, Compression::default()));
+    let mut written = 0usize;
+    for p in lib_paths {
+        let src = Path::new(p);
+        if !src.exists() {
+            continue;
+        }
+        let base = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "item".to_string());
+        if src.is_dir() {
+            tar.append_dir_all(&base, src).map_err(|e| e.to_string())?;
+        } else {
+            let mut f = std::fs::File::open(src).map_err(|e| e.to_string())?;
+            tar.append_file(&base, &mut f).map_err(|e| e.to_string())?;
+        }
+        written += 1;
+    }
+    tar.into_inner()
+        .map_err(|e| e.to_string())?
+        .finish()
+        .map_err(|e| e.to_string())?;
+    Ok(written)
+}
+
+/// Record a manual "mark as used" for an item (usage/staleness tracking).
+#[tauri::command]
+pub fn mark_used(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::mark_item_used(&conn, id).map_err(|e| e.to_string())
+}
+
+/// Live items never marked used — the "candidates for deletion" review queue.
+#[tauri::command]
+pub fn deletion_candidates(state: State<AppState>) -> Result<Vec<Item>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::never_used_items(&conn).map_err(|e| e.to_string())
+}
+
+/// Whether the first-run onboarding wizard has been completed (settings flag).
+#[tauri::command]
+pub fn is_onboarded(state: State<AppState>) -> Result<bool, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    Ok(db::get_setting(&conn, "onboarded")
+        .map_err(|e| e.to_string())?
+        .as_deref()
+        == Some("1"))
+}
+
+/// Mark the onboarding wizard as completed so it won't show again.
+#[tauri::command]
+pub fn set_onboarded(state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::set_setting(&conn, "onboarded", "1").map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -857,6 +1157,32 @@ mod tests {
     }
 
     #[test]
+    fn export_archive_bundles_folders_and_skips_missing() {
+        use flate2::read::GzDecoder;
+        let d = tempfile::tempdir().unwrap();
+        // One real skill folder with a SKILL.md, one missing path.
+        let skill = d.path().join("my-skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "BODY").unwrap();
+        let missing = d.path().join("gone");
+
+        let dest = d.path().join("out.tar.gz");
+        let n = write_export_archive(
+            &[skill.to_string_lossy().to_string(), missing.to_string_lossy().to_string()],
+            &dest,
+        )
+        .unwrap();
+        assert_eq!(n, 1); // missing path skipped
+
+        // The archive round-trips: unpack and confirm the folder+file landed under its basename.
+        let unpack = d.path().join("unpacked");
+        fs::create_dir_all(&unpack).unwrap();
+        let f = fs::File::open(&dest).unwrap();
+        tar::Archive::new(GzDecoder::new(f)).unpack(&unpack).unwrap();
+        assert_eq!(fs::read_to_string(unpack.join("my-skill/SKILL.md")).unwrap(), "BODY");
+    }
+
+    #[test]
     fn read_library_content_handles_file_and_folder() {
         let d = tempfile::tempdir().unwrap();
         let folder = d.path().join("skillfolder");
@@ -869,6 +1195,20 @@ mod tests {
         let f = d.path().join("agent.md");
         fs::write(&f, "FILE BODY").unwrap();
         assert_eq!(read_library_content(f.to_str().unwrap()).unwrap(), "FILE BODY");
+    }
+
+    #[test]
+    fn three_way_conflict_only_when_both_sides_diverge() {
+        // Neither side changed → no conflict.
+        assert!(!is_three_way_conflict("base", "base", "base"));
+        // Only the library changed → a plain push resolves it, not a conflict.
+        assert!(!is_three_way_conflict("base", "lib", "base"));
+        // Only the disk changed → a plain pull resolves it, not a conflict.
+        assert!(!is_three_way_conflict("base", "base", "disk"));
+        // Both changed but landed on the SAME content → already agree, not a conflict.
+        assert!(!is_three_way_conflict("base", "same", "same"));
+        // Both changed and now disagree → genuine 3-way conflict.
+        assert!(is_three_way_conflict("base", "lib", "disk"));
     }
 
     #[test]

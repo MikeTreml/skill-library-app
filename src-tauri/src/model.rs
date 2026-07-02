@@ -78,6 +78,10 @@ pub struct Item {
     pub library_path: String,
     pub has_variants: bool,
     pub archived: bool,
+    /// Usage/staleness tracking: last time the user marked this item as used, and a
+    /// running count. `last_used_at` is None until the first "mark as used".
+    pub last_used_at: Option<String>,
+    pub use_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,4 +120,29 @@ pub struct PlacementInfo {
     pub location_label: String,
     pub abs_path: String,
     pub status: String, // in_sync | drifted | missing
+}
+
+/// A 3-way conflict surfaced in the Deploy-mode "conflict inbox": both the library
+/// copy AND the on-disk deployed copy have diverged from the last common sync
+/// baseline, so neither push nor pull is safe without the user choosing a side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conflict {
+    pub placement_id: i64,
+    pub item_name: String,
+    pub location_label: String,
+    pub abs_path: String,
+}
+
+/// Aggregated sync status for one location, rolled up across all its placements —
+/// powers the Deploy mode "map view" (one card per location) instead of requiring
+/// the user to drill into each item's sync panel individually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationDeployStatus {
+    pub location_id: i64,
+    pub label: String,
+    pub root_path: String,
+    pub in_sync: u32,
+    pub drifted: u32,
+    pub missing: u32,
+    pub total: u32,
 }

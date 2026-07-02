@@ -13,10 +13,12 @@
         <h1>Skill &amp; Agent Library</h1>
         <input id="search" class="search" type="search" placeholder="Search skills &amp; agents…" />
         <span id="status" class="status"></span>
+        <button id="palette-btn" class="secondary" title="Command palette (Ctrl/⌘+K)">⌘K</button>
         <button id="classify" class="secondary">✦ Classify</button>
         <button id="import" class="primary">⟳ Scan &amp; import</button>
         <button id="cancel-import" class="secondary" hidden>✕ Cancel</button>
       </header>
+      <nav id="modebar" class="modebar"></nav>
       <div class="layout">
         <nav class="sidebar">
           <div id="filters"></div>
@@ -25,11 +27,19 @@
         </nav>
         <main class="content">
           <div id="selbar" class="selbar" hidden></div>
+          <div id="dashboard" class="dashboard" hidden></div>
+          <div id="deploy" class="dashboard" hidden></div>
           <ul id="items" class="items"></ul>
           <div id="dupes" class="dupes" hidden></div>
           <p id="empty" class="empty" hidden>Nothing here yet — click <b>Scan &amp; import</b>.</p>
         </main>
         <aside id="detail" class="detail" hidden></aside>
+      </div>
+      <div id="palette" class="palette-overlay" hidden>
+        <div class="palette-box">
+          <input id="palette-input" class="palette-input" type="text" placeholder="Search items or run an action…" />
+          <ul id="palette-results" class="palette-results"></ul>
+        </div>
       </div>
     </div>
   </body>

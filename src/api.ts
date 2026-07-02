@@ -18,6 +18,8 @@ export interface Item {
   library_path: string;
   has_variants: boolean;
   archived: boolean;
+  last_used_at: string | null;
+  use_count: number;
 }
 
 export interface ImportSummary {
@@ -55,7 +57,21 @@ export const aiAvailable = () => invoke<boolean>("ai_available");
 export const classifyAll = (ids?: number[]) =>
   invoke<ClassifySummary>("classify_all", { ids: ids ?? null });
 export const listDuplicates = () => invoke<DupGroup[]>("list_duplicates");
+export const dismissCluster = (clusterKey: string) =>
+  invoke<void>("dismiss_cluster", { clusterKey });
+export const undismissCluster = (clusterKey: string) =>
+  invoke<void>("undismiss_cluster", { clusterKey });
+export const listDismissedClusters = () => invoke<string[]>("list_dismissed_clusters");
+
+export const addItemTag = (id: number, tag: string) => invoke<void>("add_item_tag", { id, tag });
+export const removeItemTag = (id: number, tag: string) =>
+  invoke<void>("remove_item_tag", { id, tag });
+export const listItemTags = () => invoke<[number, string][]>("list_item_tags");
+export const listAllTags = () => invoke<[string, number][]>("list_all_tags");
 export const listVerbMap = () => invoke<[string, string][]>("list_verb_map");
+export const listUncanonicalVerbs = () => invoke<[string, number][]>("list_uncanonical_verbs");
+export const canonicalVerbs = () => invoke<string[]>("canonical_verbs");
+export const recentActivity = () => invoke<[number, string, string, string][]>("recent_activity");
 export const addSynonym = (canonical: string, synonym: string) =>
   invoke<void>("add_synonym", { canonical, synonym });
 export const removeSynonym = (synonym: string) => invoke<void>("remove_synonym", { synonym });
@@ -112,3 +128,35 @@ export const pushToLocation = (placementId: number) =>
   invoke<void>("push_to_location", { placementId });
 export const pullFromLocation = (placementId: number) =>
   invoke<void>("pull_from_location", { placementId });
+
+export interface LocationDeployStatus {
+  location_id: number;
+  label: string;
+  root_path: string;
+  in_sync: number;
+  drifted: number;
+  missing: number;
+  total: number;
+}
+export const deployStatus = () => invoke<LocationDeployStatus[]>("deploy_status");
+
+export interface Conflict {
+  placement_id: number;
+  item_name: string;
+  location_label: string;
+  abs_path: string;
+}
+export const listConflicts = () => invoke<Conflict[]>("list_conflicts");
+
+export const exportItems = (ids: number[], destPath: string) =>
+  invoke<number>("export_items", { ids, destPath });
+
+export const setApiKey = (key: string) => invoke<void>("set_api_key", { key });
+// Returns [storedInApp, envVarSet] — never the secret itself.
+export const apiKeyStatus = () => invoke<[boolean, boolean]>("api_key_status");
+
+export const markUsed = (id: number) => invoke<void>("mark_used", { id });
+export const deletionCandidates = () => invoke<Item[]>("deletion_candidates");
+
+export const isOnboarded = () => invoke<boolean>("is_onboarded");
+export const setOnboarded = () => invoke<void>("set_onboarded");

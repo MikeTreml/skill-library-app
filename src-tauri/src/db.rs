@@ -69,6 +69,26 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             canonical TEXT NOT NULL,
             synonym TEXT NOT NULL UNIQUE
         );
+        CREATE TABLE IF NOT EXISTS dismissed_clusters (
+            cluster_key TEXT PRIMARY KEY,
+            dismissed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS item_tags (
+            item_id INTEGER NOT NULL REFERENCES items(id),
+            tag TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY(item_id, tag)
+        );
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         ",
     )?;
     // Migrate pre-existing item tables that predate the v2 classification columns.
@@ -79,6 +99,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         ("qualifier", "TEXT"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("deleted", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_used_at", "TEXT"),
+        ("use_count", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         ensure_column(conn, "items", col, decl)?;
     }
@@ -209,6 +231,14 @@ pub fn item_canonical_hash(conn: &Connection, item_id: i64) -> rusqlite::Result<
     )
 }
 
+pub fn item_name(conn: &Connection, item_id: i64) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT name FROM items WHERE id = ?1",
+        params![item_id],
+        |r| r.get(0),
+    )
+}
+
 pub fn item_library_path(conn: &Connection, item_id: i64) -> rusqlite::Result<String> {
     conn.query_row(
         "SELECT library_path FROM items WHERE id = ?1",
@@ -237,6 +267,48 @@ pub fn placements_for_item(
     )?;
     let rows = stmt.query_map(params![item_id], |r| {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?;
+    rows.collect()
+}
+
+/// Every placement across all (non-deleted) items, joined with its item's canonical
+/// hash — feeds the Deploy mode "map view" (one status roll-up per location instead
+/// of drilling into each item individually).
+/// Returns (placement_id, location_id, location_label, root_path, rel_path, canonical_hash).
+pub fn all_placements_with_hash(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(i64, i64, String, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, l.id, l.label, l.root_path, p.rel_path, i.canonical_hash
+         FROM placements p
+         JOIN locations l ON p.location_id = l.id
+         JOIN items i ON p.item_id = i.id
+         WHERE i.deleted = 0
+         ORDER BY l.label",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    })?;
+    rows.collect()
+}
+
+/// Like `all_placements_with_hash` but also returns the placement's stored
+/// `location_hash` (the baseline recorded at last sync — the "last common sync"
+/// ancestor used for 3-way conflict detection). Returns
+/// (placement_id, location_label, root_path, rel_path, canonical_hash, baseline_hash).
+pub fn placements_for_conflict_check(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(i64, String, String, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, l.label, l.root_path, p.rel_path, i.canonical_hash, p.location_hash
+         FROM placements p
+         JOIN locations l ON p.location_id = l.id
+         JOIN items i ON p.item_id = i.id
+         WHERE i.deleted = 0
+         ORDER BY l.label",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
     })?;
     rows.collect()
 }
@@ -303,7 +375,8 @@ pub fn item_type(conn: &Connection, id: i64) -> rusqlite::Result<String> {
 }
 
 const ITEM_COLUMNS: &str = "id, item_type, name, slug, description, category, subcategory,
-     object, sub_object, verb, qualifier, canonical_hash, library_path, has_variants, archived";
+     object, sub_object, verb, qualifier, canonical_hash, library_path, has_variants, archived,
+     last_used_at, use_count";
 
 fn map_item_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     let type_str: String = r.get(1)?;
@@ -323,6 +396,8 @@ fn map_item_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         library_path: r.get(12)?,
         has_variants: r.get::<_, i64>(13)? != 0,
         archived: r.get::<_, i64>(14)? != 0,
+        last_used_at: r.get(15)?,
+        use_count: r.get(16)?,
     })
 }
 
@@ -414,12 +489,157 @@ pub fn remove_synonym(conn: &Connection, synonym: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-/// Lowercased synonym → canonical verb, from the editable verb map.
-pub fn verb_lookup(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<String, String>> {
-    let mut stmt = conn.prepare("SELECT synonym, canonical FROM verb_map")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+/// Session-independent duplicate-cluster dismissals ("not actually a duplicate"),
+/// keyed by the same `DupGroup.key` the frontend already groups by (e.g.
+/// `"Ax › Form — Create"`). Persisted so Triage doesn't re-surface a dismissed
+/// cluster after an app restart.
+pub fn dismiss_cluster(conn: &Connection, cluster_key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO dismissed_clusters (cluster_key) VALUES (?1)",
+        params![cluster_key],
+    )?;
+    Ok(())
+}
+
+pub fn undismiss_cluster(conn: &Connection, cluster_key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM dismissed_clusters WHERE cluster_key = ?1",
+        params![cluster_key],
+    )?;
+    Ok(())
+}
+
+pub fn list_dismissed_clusters(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT cluster_key FROM dismissed_clusters")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+// ---- user-defined tags (orthogonal to the AI taxonomy) ----
+
+/// Attach a tag to an item (idempotent). Tags are lowercased+trimmed for consistency.
+pub fn add_item_tag(conn: &Connection, item_id: i64, tag: &str) -> rusqlite::Result<()> {
+    let t = tag.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?1, ?2)",
+        params![item_id, t],
+    )?;
+    Ok(())
+}
+
+pub fn remove_item_tag(conn: &Connection, item_id: i64, tag: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM item_tags WHERE item_id = ?1 AND tag = ?2",
+        params![item_id, tag.trim().to_ascii_lowercase()],
+    )?;
+    Ok(())
+}
+
+/// All (item_id, tag) pairs, so the frontend can build an id→tags map in one round-trip.
+pub fn list_item_tags(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT item_id, tag FROM item_tags ORDER BY tag")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Distinct tag names with their item counts, for the sidebar filter list.
+pub fn list_all_tags(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.tag, COUNT(*)
+         FROM item_tags t JOIN items i ON t.item_id = i.id
+         WHERE i.deleted = 0
+         GROUP BY t.tag ORDER BY t.tag",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Distinct non-null verbs currently assigned to live items, with counts —
+/// "uncanonical" verbs for the verb-governance UI.
+pub fn distinct_verbs_with_counts(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT verb, COUNT(*)
+         FROM items
+         WHERE verb IS NOT NULL AND verb <> '' AND deleted = 0
+         GROUP BY verb ORDER BY verb",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Append an entry to the activity log (audit trail powering the Dashboard feed).
+pub fn log_activity(conn: &Connection, kind: &str, summary: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO activity_log (kind, summary) VALUES (?1, ?2)",
+        params![kind, summary],
+    )?;
+    Ok(())
+}
+
+/// Most-recent activity entries first: (id, kind, summary, created_at).
+pub fn recent_activity(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, summary, created_at FROM activity_log ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
     })?;
+    rows.collect()
+}
+
+/// Read a setting value by key (None if unset).
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+        .optional()
+}
+
+/// Upsert a setting value.
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Delete a setting (no-op if absent).
+pub fn delete_setting(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+    Ok(())
+}
+
+/// Record a "use" of an item: bump use_count and stamp last_used_at to now.
+pub fn mark_item_used(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE items SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Stale candidates: live (non-deleted, non-archived) items never marked used, oldest
+/// created first — the "candidates for deletion" review queue.
+pub fn never_used_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
+    let sql = format!(
+        "SELECT {ITEM_COLUMNS} FROM items \
+         WHERE deleted = 0 AND archived = 0 AND use_count = 0 \
+         ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_item_row)?;
+    rows.collect()
+}
+
+/// Lowercased synonym → canonical verb, from the editable verb map.
+pub fn verb_lookup(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT synonym, canonical FROM verb_map")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut map = std::collections::HashMap::new();
     for row in rows {
         let (syn, canon) = row?;
@@ -661,5 +881,128 @@ mod tests {
             insert_item_if_absent(&c, ItemType::Skill, "x", "x", "d", "h", "lib/x").unwrap();
         set_verb(&c, id, "Create").unwrap();
         assert_eq!(list_items(&c).unwrap()[0].verb.as_deref(), Some("Create"));
+    }
+
+    #[test]
+    fn all_placements_with_hash_joins_across_locations_and_skips_deleted() {
+        let c = open_in_memory().unwrap();
+        let (item1, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "hash1", "lib/a").unwrap();
+        let (item2, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "hash2", "lib/b").unwrap();
+        let loc1 = upsert_location(&c, "Claude skills", "/home/.claude/skills", LocationKind::ClaudeSkills).unwrap();
+        let loc2 = upsert_location(&c, "Codex skills", "/home/.codex/skills", LocationKind::Codex).unwrap();
+        upsert_placement(&c, item1, loc1, "a", "hash1", "in_sync").unwrap();
+        upsert_placement(&c, item2, loc1, "b", "hash2", "in_sync").unwrap();
+        upsert_placement(&c, item2, loc2, "b", "hash2", "in_sync").unwrap();
+
+        let rows = all_placements_with_hash(&c).unwrap();
+        assert_eq!(rows.len(), 3);
+        // Every row carries its item's *current* canonical hash (for fresh status derivation).
+        assert!(rows.iter().any(|(_, lid, _, _, _, hash)| *lid == loc1 && hash == "hash1"));
+        assert!(rows.iter().filter(|(_, lid, _, _, _, _)| *lid == loc2).count() == 1);
+
+        // Soft-deleting an item's placements should drop out of the roll-up.
+        conn_mark_deleted(&c, item1);
+        let rows2 = all_placements_with_hash(&c).unwrap();
+        assert_eq!(rows2.len(), 2);
+    }
+
+    /// Test-only helper: tombstone an item directly (mirrors what `delete_items` does at
+    /// the DB layer) so `all_placements_with_hash`'s `WHERE i.deleted = 0` filter can be
+    /// exercised without pulling in the full commands-layer delete flow.
+    fn conn_mark_deleted(conn: &Connection, item_id: i64) {
+        conn.execute("UPDATE items SET deleted = 1 WHERE id = ?1", params![item_id])
+            .unwrap();
+    }
+
+    #[test]
+    fn dismissed_clusters_persist_and_are_reversible() {
+        let c = open_in_memory().unwrap();
+        assert!(list_dismissed_clusters(&c).unwrap().is_empty());
+
+        dismiss_cluster(&c, "Ax › Form — Create").unwrap();
+        // Idempotent: dismissing twice doesn't error or duplicate.
+        dismiss_cluster(&c, "Ax › Form — Create").unwrap();
+        let dismissed = list_dismissed_clusters(&c).unwrap();
+        assert_eq!(dismissed.len(), 1);
+        assert!(dismissed.contains("Ax › Form — Create"));
+
+        undismiss_cluster(&c, "Ax › Form — Create").unwrap();
+        assert!(list_dismissed_clusters(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn item_tags_crud_and_counts() {
+        let c = open_in_memory().unwrap();
+        let (a, _) = insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
+        let (b, _) = insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
+
+        add_item_tag(&c, a, "Core").unwrap(); // normalizes to lowercase
+        add_item_tag(&c, a, "core").unwrap(); // idempotent after normalize
+        add_item_tag(&c, b, "core").unwrap();
+        add_item_tag(&c, a, "experimental").unwrap();
+        add_item_tag(&c, a, "   ").unwrap(); // blank ignored
+
+        let pairs = list_item_tags(&c).unwrap();
+        assert_eq!(pairs.iter().filter(|(id, _)| *id == a).count(), 2);
+
+        let tags = list_all_tags(&c).unwrap();
+        // "core" on 2 items, "experimental" on 1.
+        assert!(tags.iter().any(|(t, n)| t == "core" && *n == 2));
+        assert!(tags.iter().any(|(t, n)| t == "experimental" && *n == 1));
+
+        remove_item_tag(&c, a, "Core").unwrap(); // case-insensitive removal
+        assert_eq!(
+            list_all_tags(&c).unwrap().iter().find(|(t, _)| t == "core").map(|(_, n)| *n),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn activity_log_appends_and_returns_newest_first() {
+        let c = open_in_memory().unwrap();
+        assert!(recent_activity(&c, 10).unwrap().is_empty());
+        log_activity(&c, "import", "Imported 5 new items").unwrap();
+        log_activity(&c, "merge", "Merged 2 → 1").unwrap();
+        log_activity(&c, "delete", "Deleted 1 item").unwrap();
+
+        let recent = recent_activity(&c, 2).unwrap();
+        assert_eq!(recent.len(), 2); // limit honored
+        assert_eq!(recent[0].1, "delete"); // newest first
+        assert_eq!(recent[1].1, "merge");
+    }
+
+    #[test]
+    fn settings_upsert_get_delete() {
+        let c = open_in_memory().unwrap();
+        assert_eq!(get_setting(&c, "openai_api_key").unwrap(), None);
+        set_setting(&c, "openai_api_key", "sk-abc").unwrap();
+        assert_eq!(get_setting(&c, "openai_api_key").unwrap().as_deref(), Some("sk-abc"));
+        set_setting(&c, "openai_api_key", "sk-xyz").unwrap(); // upsert overwrites
+        assert_eq!(get_setting(&c, "openai_api_key").unwrap().as_deref(), Some("sk-xyz"));
+        delete_setting(&c, "openai_api_key").unwrap();
+        assert_eq!(get_setting(&c, "openai_api_key").unwrap(), None);
+    }
+
+    #[test]
+    fn usage_tracking_marks_and_lists_candidates() {
+        let c = open_in_memory().unwrap();
+        let (a, _) = insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
+        let (b, _) = insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
+
+        // Both start unused → both are deletion candidates.
+        assert_eq!(never_used_items(&c).unwrap().len(), 2);
+
+        mark_item_used(&c, a).unwrap();
+        mark_item_used(&c, a).unwrap(); // count accumulates
+        let used = list_items(&c).unwrap().into_iter().find(|i| i.id == a).unwrap();
+        assert_eq!(used.use_count, 2);
+        assert!(used.last_used_at.is_some());
+
+        // Only the never-used item remains a candidate.
+        let cands = never_used_items(&c).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].id, b);
     }
 }

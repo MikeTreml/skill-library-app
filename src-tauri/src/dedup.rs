@@ -72,6 +72,8 @@ mod tests {
             library_path: "p".into(),
             has_variants: false,
             archived: false,
+            last_used_at: None,
+            use_count: 0,
         }
     }
 
