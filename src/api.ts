@@ -148,6 +148,13 @@ export interface Conflict {
 }
 export const listConflicts = () => invoke<Conflict[]>("list_conflicts");
 
+/// Batch push for one location: returns [pushed, skipped_conflicts, skipped_ok].
+export const pushAllToLocation = (locationId: number) =>
+  invoke<[number, number, number]>("push_all_to_location", { locationId });
+
+export const hasRefineBackup = (id: number) => invoke<boolean>("has_refine_backup", { id });
+export const revertRefine = (id: number) => invoke<void>("revert_refine", { id });
+
 export const exportItems = (ids: number[], destPath: string) =>
   invoke<number>("export_items", { ids, destPath });
 

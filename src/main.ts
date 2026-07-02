@@ -34,6 +34,9 @@ import {
   pullFromLocation,
   pushToLocation,
   listConflicts,
+  pushAllToLocation,
+  hasRefineBackup,
+  revertRefine,
   readPlacement,
   refineItem,
   removeScanDir,
@@ -737,7 +740,11 @@ async function renderDeploy() {
         `<span class="dstat warn">${l.drifted} drifted</span>` +
         `<span class="dstat danger">${l.missing} missing</span>` +
         `<span class="dstat">${l.total} total</span>` +
-        `</div></div>`
+        `</div>` +
+        (healthy
+          ? ""
+          : `<button class="add-btn push-all" data-loc="${l.location_id}" title="Push library versions to every drifted/missing placement here (3-way conflicts are skipped)">Push all →</button>`) +
+        `</div>`
       );
     })
     .join("");
@@ -785,6 +792,24 @@ async function renderDeploy() {
     b.addEventListener("click", () => resolve(Number(b.dataset.pid), true));
   for (const b of deployEl.querySelectorAll<HTMLButtonElement>(".cf-pull"))
     b.addEventListener("click", () => resolve(Number(b.dataset.pid), false));
+  for (const b of deployEl.querySelectorAll<HTMLButtonElement>(".push-all"))
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      statusEl.textContent = "Pushing all…";
+      try {
+        const [pushed, conflicts, ok] = await pushAllToLocation(Number(b.dataset.loc));
+        await load();
+        renderDeploy();
+        statusEl.textContent =
+          `Pushed ${pushed} item(s)` +
+          (conflicts ? `, skipped ${conflicts} conflict(s) — resolve them below` : "") +
+          (ok ? ` (${ok} already in sync)` : "") +
+          ".";
+      } catch (e) {
+        b.disabled = false;
+        statusEl.textContent = `Error: ${e}`;
+      }
+    });
 }
 
 function renderMain() {
@@ -819,6 +844,7 @@ async function openDetail(id: number) {
   detailEl.innerHTML =
     `<div class="detail-head"><div class="detail-title"><span class="badge ${it.item_type}">${it.item_type}</span><b>${esc(it.name)}</b></div>` +
     `<button id="detail-refine" class="rf-btn" title="Refactor & improve">✦</button>` +
+    `<button id="detail-revert" class="rf-btn" title="Revert last refine (toggles between current and backed-up version)" hidden>↩</button>` +
     `<button id="detail-used" class="rf-btn" title="Mark as used (usage tracking)">✓</button>` +
     `<button id="detail-archive" class="rf-btn" title="Archive">🗄</button>` +
     `<button id="detail-close" class="src-rm" title="Close">✕</button></div>` +
@@ -830,6 +856,23 @@ async function openDetail(id: number) {
     `<pre class="detail-body">Loading…</pre>`;
   document.getElementById("detail-close")!.addEventListener("click", closeDetail);
   document.getElementById("detail-refine")!.addEventListener("click", () => openRefine(id));
+  const revertBtn = document.getElementById("detail-revert") as HTMLButtonElement;
+  hasRefineBackup(id)
+    .then((has) => {
+      revertBtn.hidden = !has;
+    })
+    .catch(() => {});
+  revertBtn.addEventListener("click", async () => {
+    if (!confirm("Revert to the version before the last refine? (You can toggle back.)")) return;
+    try {
+      await revertRefine(id);
+      await load();
+      openDetail(id); // re-render with restored content
+      statusEl.textContent = "Reverted last refine.";
+    } catch (e) {
+      statusEl.textContent = `Error: ${e}`;
+    }
+  });
   document.getElementById("detail-used")!.addEventListener("click", async () => {
     try {
       await markUsed(id);

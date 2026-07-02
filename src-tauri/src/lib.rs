@@ -96,6 +96,8 @@ pub fn run() {
             commands::push_to_location,
             commands::push_all_to_location,
             commands::pull_from_location,
+            commands::has_refine_backup,
+            commands::revert_refine,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

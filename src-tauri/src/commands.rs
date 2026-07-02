@@ -189,6 +189,39 @@ pub fn apply_refinement(state: State<AppState>, id: i64, content: String) -> Res
     Ok(())
 }
 
+/// True when a refine backup exists for this item (enables the "Revert refine" UI).
+#[tauri::command]
+pub fn has_refine_backup(state: State<AppState>, id: i64) -> Result<bool, String> {
+    Ok(state
+        .library_root
+        .join("_refine_backups")
+        .join(format!("{id}.bak"))
+        .exists())
+}
+
+/// Undo the last applied refinement: restore the `_refine_backups/{id}.bak` content
+/// into the library file. The pre-revert content is written back into the backup slot,
+/// so revert is itself revertable (it toggles between the two versions).
+#[tauri::command]
+pub fn revert_refine(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let path = db::item_library_path(&conn, id).map_err(|e| e.to_string())?;
+    let file = library_file(&path);
+    let bak = state
+        .library_root
+        .join("_refine_backups")
+        .join(format!("{id}.bak"));
+    let backup = std::fs::read(&bak).map_err(|_| "No refine backup exists for this item".to_string())?;
+    let current = std::fs::read(&file).map_err(|e| e.to_string())?;
+    std::fs::write(&file, &backup).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(&bak, current); // swap: allows toggling back
+    let new_hash = crate::hash::hash_path(Path::new(&path)).map_err(|e| e.to_string())?;
+    db::set_canonical_hash(&conn, id, &new_hash).map_err(|e| e.to_string())?;
+    let name = db::item_name(&conn, id).map_err(|e| e.to_string())?;
+    let _ = db::log_activity(&conn, "refine", &format!("Reverted refine on \"{name}\""));
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub struct MergeSource {
     pub id: i64,
