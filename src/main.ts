@@ -49,10 +49,8 @@ import {
   type DupGroup,
   type Item,
   type ItemType,
-  type LocationDeployStatus,
   type MergeResult,
   type RefineResult,
-  type ScanDir,
 } from "./api";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -79,6 +77,7 @@ import {
   paletteInputEl,
   paletteResultsEl,
 } from "./dom";
+import { S, itemById, type View, type TypeFilter } from "./state";
 
 const DIRECTIVES = [
   "Generalize: open it beyond a single tool or topic to broader options",
@@ -94,42 +93,6 @@ const TOOLS = [
   "PowerShell", "Monitor", "WebFetch", "WebSearch", "Agent", "Skill",
 ];
 
-type TypeFilter = "all" | "skill" | "agent";
-// "duplicates" is labeled "Triage" in the UI (clusters + untriaged queue).
-type View = "dashboard" | "library" | "duplicates" | "archived" | "deleted" | "deploy";
-
-let allItems: Item[] = [];
-let archivedItems: Item[] = [];
-let deletedItems: Item[] = [];
-let objectsTreeOpen = true;
-let scanDirs: ScanDir[] = [];
-let dupGroups: DupGroup[] = [];
-let deployStatuses: LocationDeployStatus[] = [];
-// item id → user tags, and the full tag list with counts for the sidebar filter.
-let itemTagsMap = new Map<number, string[]>();
-let allTags: [string, number][] = [];
-let tagFilter: string | null = null;
-let verbMap: [string, string][] = [];
-// Verbs on items that aren't canonical, + the canonical list for the "promote to" picker.
-let uncanonicalVerbs: [string, number][] = [];
-let canonVerbList: string[] = [];
-let activityFeed: [number, string, string, string][] = [];
-let aiOk = false;
-let view: View = "dashboard";
-let typeFilter: TypeFilter = "all";
-let objectFilter: string | null = null;
-let query = "";
-let selectedId: number | null = null;
-const selection = new Set<number>();
-// Browse keyboard navigation: index of the highlighted row within visibleItems().
-let cursorIdx = 0;
-// Auto-scan on window focus: re-scan when the app regains focus after this long.
-const AUTO_SCAN_AFTER_MS = 5 * 60 * 1000; // 5 minutes
-// Initialize to "now" so the initial app load never triggers an auto-scan.
-let lastScanAt = Date.now();
-let onboardingOpen = false;
-
-const itemById = (id: number) => allItems.find((i) => i.id === id);
 
 // ---------- top-bar mode switcher ----------
 async function openSettings() {
@@ -167,7 +130,7 @@ async function openSettings() {
     try {
       await setApiKey(key);
       (document.getElementById("set-key") as HTMLInputElement).value = "";
-      aiOk = await aiAvailable();
+      S.aiOk = await aiAvailable();
       await refreshStatus();
       statusEl.textContent = "API key saved.";
     } catch (e) {
@@ -177,7 +140,7 @@ async function openSettings() {
   document.getElementById("set-clear")!.addEventListener("click", async () => {
     try {
       await setApiKey("");
-      aiOk = await aiAvailable();
+      S.aiOk = await aiAvailable();
       await refreshStatus();
       statusEl.textContent = "Stored API key cleared.";
     } catch (e) {
@@ -188,14 +151,14 @@ async function openSettings() {
 
 function renderModebar() {
   const btn = (v: View, label: string, n?: number) =>
-    `<button class="mode${view === v ? " active" : ""}" data-view="${v}"><span>${label}</span>${n !== undefined ? `<span class="count">${n}</span>` : ""}</button>`;
+    `<button class="mode${S.view === v ? " active" : ""}" data-view="${v}"><span>${label}</span>${n !== undefined ? `<span class="count">${n}</span>` : ""}</button>`;
   modebarEl.innerHTML =
     btn("dashboard", "Dashboard") +
     btn("library", "Browse") +
-    btn("duplicates", "Triage", dupGroups.length) +
+    btn("duplicates", "Triage", S.dupGroups.length) +
     btn("deploy", "Deploy") +
-    btn("archived", "Archived", archivedItems.length) +
-    btn("deleted", "Deleted", deletedItems.length) +
+    btn("archived", "Archived", S.archivedItems.length) +
+    btn("deleted", "Deleted", S.deletedItems.length) +
     `<button class="mode" id="mode-settings" title="Settings"><span>⚙ Settings</span></button>`;
   for (const b of modebarEl.querySelectorAll<HTMLButtonElement>("[data-view]"))
     b.addEventListener("click", () => goToView(b.dataset.view as View));
@@ -203,7 +166,7 @@ function renderModebar() {
 }
 
 function goToView(v: View) {
-  view = v;
+  S.view = v;
   renderModebar();
   renderFilters();
   renderMain();
@@ -212,24 +175,24 @@ function goToView(v: View) {
 // ---------- sidebar ----------
 function renderFilters() {
   const typeCount = (t: TypeFilter) =>
-    t === "all" ? allItems.length : allItems.filter((i) => i.item_type === t).length;
+    t === "all" ? S.allItems.length : S.allItems.filter((i) => i.item_type === t).length;
   const typeBtn = (t: TypeFilter, label: string) =>
-    `<button class="nav${typeFilter === t ? " active" : ""}" data-type="${t}"><span>${label}</span><span class="count">${typeCount(t)}</span></button>`;
+    `<button class="nav${S.typeFilter === t ? " active" : ""}" data-type="${t}"><span>${label}</span><span class="count">${typeCount(t)}</span></button>`;
 
   const objects = new Map<string, number>();
   let untriaged = 0;
-  for (const it of allItems) {
+  for (const it of S.allItems) {
     if (it.object) objects.set(it.object, (objects.get(it.object) ?? 0) + 1);
     else untriaged++;
   }
   const objBtn = (key: string | null, label: string, n: number) =>
-    `<button class="nav sub${objectFilter === key && view === "library" ? " active" : ""}" data-object="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
+    `<button class="nav sub${S.objectFilter === key && S.view === "library" ? " active" : ""}" data-object="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
   let tree: string;
   if (objects.size || untriaged) {
     tree =
-      `<details class="nav-tree" id="obj-tree"${objectsTreeOpen ? " open" : ""}>` +
+      `<details class="nav-tree" id="obj-tree"${S.objectsTreeOpen ? " open" : ""}>` +
       `<summary class="nav-head">Objects</summary>` +
-      objBtn(null, "All objects", allItems.length) +
+      objBtn(null, "All objects", S.allItems.length) +
       [...objects.entries()].sort((a, b) => b[1] - a[1]).map(([o, n]) => objBtn(o, o, n)).join("") +
       (untriaged ? objBtn("__none__", "Untriaged", untriaged) : "") +
       `</details>`;
@@ -238,11 +201,11 @@ function renderFilters() {
   }
 
   const tagBtn = (key: string | null, label: string, n: number) =>
-    `<button class="nav sub${tagFilter === key ? " active" : ""}" data-tag="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
-  const tagBlock = allTags.length
+    `<button class="nav sub${S.tagFilter === key ? " active" : ""}" data-tag="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
+  const tagBlock = S.allTags.length
     ? `<details class="nav-tree" open><summary class="nav-head">Tags</summary>` +
-      tagBtn(null, "All (clear tag)", allItems.length) +
-      allTags.map(([t, n]) => tagBtn(t, `#${t}`, n)).join("") +
+      tagBtn(null, "All (clear tag)", S.allItems.length) +
+      S.allTags.map(([t, n]) => tagBtn(t, `#${t}`, n)).join("") +
       `</details>`
     : "";
 
@@ -253,29 +216,29 @@ function renderFilters() {
 
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-type]"))
     b.addEventListener("click", () => {
-      typeFilter = b.dataset.type as TypeFilter;
-      cursorIdx = 0;
+      S.typeFilter = b.dataset.type as TypeFilter;
+      S.cursorIdx = 0;
       renderFilters();
       renderMain();
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-object]"))
     b.addEventListener("click", () => {
-      objectFilter = b.dataset.object === "" ? null : b.dataset.object!;
-      cursorIdx = 0;
+      S.objectFilter = b.dataset.object === "" ? null : b.dataset.object!;
+      S.cursorIdx = 0;
       goToView("library");
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-tag]"))
     b.addEventListener("click", () => {
-      tagFilter = b.dataset.tag === "" ? null : b.dataset.tag!;
-      cursorIdx = 0;
+      S.tagFilter = b.dataset.tag === "" ? null : b.dataset.tag!;
+      S.cursorIdx = 0;
       goToView("library");
     });
   const objTree = document.getElementById("obj-tree") as HTMLDetailsElement | null;
-  if (objTree) objTree.addEventListener("toggle", () => (objectsTreeOpen = objTree.open));
+  if (objTree) objTree.addEventListener("toggle", () => (S.objectsTreeOpen = objTree.open));
 }
 
 function renderSources() {
-  const rows = scanDirs
+  const rows = S.scanDirs
     .map(
       (d) =>
         `<li class="src-item"><span class="badge ${d.item_type}">${d.item_type}</span><span class="src-path" title="${esc(d.path)}">${esc(d.path)}</span><button class="src-rm" data-id="${d.id}" title="Remove">✕</button></li>`,
@@ -297,7 +260,7 @@ function renderSources() {
     try {
       await addScanDir(path, t);
       input.value = "";
-      scanDirs = await listScanDirs();
+      S.scanDirs = await listScanDirs();
       renderSources();
       statusEl.textContent = `Added ${t} source — click Scan & import`;
     } catch (e) {
@@ -309,14 +272,14 @@ function renderSources() {
   for (const b of sourcesEl.querySelectorAll<HTMLButtonElement>(".src-rm"))
     b.addEventListener("click", async () => {
       await removeScanDir(Number(b.dataset.id));
-      scanDirs = await listScanDirs();
+      S.scanDirs = await listScanDirs();
       renderSources();
     });
 }
 
 function renderVerbMap() {
   const byCanon = new Map<string, string[]>();
-  for (const [canon, syn] of verbMap) {
+  for (const [canon, syn] of S.verbMap) {
     if (!byCanon.has(canon)) byCanon.set(canon, []);
     byCanon.get(canon)!.push(syn);
   }
@@ -329,9 +292,9 @@ function renderVerbMap() {
         `</div>`,
     )
     .join("");
-  const promoteOptions = canonVerbList.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
-  const govRows = uncanonicalVerbs.length
-    ? uncanonicalVerbs
+  const promoteOptions = S.canonVerbList.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  const govRows = S.uncanonicalVerbs.length
+    ? S.uncanonicalVerbs
         .map(
           ([v, n]) =>
             `<div class="verb-row gov-row"><span class="chip warn">${esc(v)}</span> <span class="count">${n}</span> ` +
@@ -340,12 +303,12 @@ function renderVerbMap() {
         .join("")
     : `<div class="nav-note">No uncanonical verbs — all classified verbs are canonical. ✓</div>`;
   const govBlock =
-    `<details class="gov-details"><summary>Uncanonical verbs (${uncanonicalVerbs.length})</summary>` +
+    `<details class="gov-details"><summary>Uncanonical verbs (${S.uncanonicalVerbs.length})</summary>` +
     `<div class="nav-note">Verbs on items outside the 13 canonical set. Promote maps the verb (as a synonym) then re-normalizes matching items.</div>` +
     `<div class="verb-list">${govRows}</div></details>`;
 
   verbmapEl.innerHTML =
-    `<details><summary>Verb map (${verbMap.length})</summary><div class="verb-list">${rows}</div>` +
+    `<details><summary>Verb map (${S.verbMap.length})</summary><div class="verb-list">${rows}</div>` +
     `<div class="add-row"><input id="vc" class="dir-input" placeholder="Canonical" /><input id="vs" class="dir-input" placeholder="synonym" /></div>` +
     `<div class="add-row"><button id="vadd" class="add-btn">+ Add synonym</button>` +
     `<button id="vrenorm" class="add-btn" title="Re-map existing items through this verb map">Re-normalize items</button></div>` +
@@ -356,7 +319,7 @@ function renderVerbMap() {
     const s = (document.getElementById("vs") as HTMLInputElement).value.trim();
     if (!c || !s) return;
     await addSynonym(c, s);
-    verbMap = await listVerbMap();
+    S.verbMap = await listVerbMap();
     renderVerbMap();
   });
   document.getElementById("vrenorm")!.addEventListener("click", async () => {
@@ -371,7 +334,7 @@ function renderVerbMap() {
   for (const b of verbmapEl.querySelectorAll<HTMLButtonElement>(".vrm"))
     b.addEventListener("click", async () => {
       await removeSynonym(b.dataset.syn!);
-      verbMap = await listVerbMap();
+      S.verbMap = await listVerbMap();
       renderVerbMap();
     });
   // Promote an uncanonical verb: map it (as a synonym) to a canonical verb, or
@@ -408,35 +371,35 @@ function itemRow(
   opts: { select?: boolean; restore?: "archive" | "delete"; cursor?: boolean } = {},
 ): string {
   const cb = opts.select
-    ? `<input type="checkbox" class="sel" data-id="${it.id}"${selection.has(it.id) ? " checked" : ""} />`
+    ? `<input type="checkbox" class="sel" data-id="${it.id}"${S.selection.has(it.id) ? " checked" : ""} />`
     : "";
   const restore = opts.restore
     ? `<button class="restore" data-id="${it.id}" data-kind="${opts.restore}">Restore</button>`
     : "";
   return (
-    `<li class="item${it.id === selectedId ? " active" : ""}${opts.cursor ? " cursor" : ""}" data-id="${it.id}">${cb}` +
+    `<li class="item${it.id === S.selectedId ? " active" : ""}${opts.cursor ? " cursor" : ""}" data-id="${it.id}">${cb}` +
     `<span class="badge ${it.item_type}">${it.item_type}</span><span class="name">${esc(it.name)}</span>${chips(it)}` +
     `<span class="desc">${esc(it.description)}</span>${restore}</li>`
   );
 }
 
 function visibleItems(): Item[] {
-  const q = query.trim().toLowerCase();
-  return allItems.filter((it) => {
-    if (typeFilter !== "all" && it.item_type !== typeFilter) return false;
-    if (objectFilter === "__none__" && it.object) return false;
-    if (objectFilter && objectFilter !== "__none__" && it.object !== objectFilter) return false;
-    if (tagFilter && !(itemTagsMap.get(it.id) ?? []).includes(tagFilter)) return false;
+  const q = S.query.trim().toLowerCase();
+  return S.allItems.filter((it) => {
+    if (S.typeFilter !== "all" && it.item_type !== S.typeFilter) return false;
+    if (S.objectFilter === "__none__" && it.object) return false;
+    if (S.objectFilter && S.objectFilter !== "__none__" && it.object !== S.objectFilter) return false;
+    if (S.tagFilter && !(S.itemTagsMap.get(it.id) ?? []).includes(S.tagFilter)) return false;
     if (!q) return true;
     return it.name.toLowerCase().includes(q) || it.description.toLowerCase().includes(q);
   });
 }
 
 function renderSelbar() {
-  const n = selection.size;
+  const n = S.selection.size;
   // The selection bar (merge/delete/etc.) is available wherever items have
   // checkboxes: the Library list and the Duplicates groups.
-  if (n === 0 || (view !== "library" && view !== "duplicates")) {
+  if (n === 0 || (S.view !== "library" && S.view !== "duplicates")) {
     selbarEl.hidden = true;
     selbarEl.innerHTML = "";
     return;
@@ -461,17 +424,17 @@ function renderSelbar() {
   document.getElementById("exp")!.addEventListener("click", exportSelected);
   document.getElementById("del")!.addEventListener("click", deleteSelected);
   document.getElementById("clr")!.addEventListener("click", () => {
-    selection.clear();
+    S.selection.clear();
     renderMain();
   });
 }
 
 function renderList() {
   const items = visibleItems();
-  if (cursorIdx > items.length - 1) cursorIdx = Math.max(0, items.length - 1);
-  listEl.innerHTML = items.map((it, i) => itemRow(it, { select: true, cursor: i === cursorIdx })).join("");
-  emptyEl.hidden = allItems.length > 0;
-  statusEl.textContent = allItems.length ? `${items.length} of ${allItems.length} items` : "";
+  if (S.cursorIdx > items.length - 1) S.cursorIdx = Math.max(0, items.length - 1);
+  listEl.innerHTML = items.map((it, i) => itemRow(it, { select: true, cursor: i === S.cursorIdx })).join("");
+  emptyEl.hidden = S.allItems.length > 0;
+  statusEl.textContent = S.allItems.length ? `${items.length} of ${S.allItems.length} items` : "";
 }
 
 // ---------- triage (duplicate clusters + untriaged queue) ----------
@@ -485,7 +448,7 @@ let triageIndex = 0;
 
 function visibleClusters(): DupGroup[] {
   const rank = { exact: 0, near: 1 } as const;
-  return [...dupGroups]
+  return [...S.dupGroups]
     .filter((g) => !dismissedKeys.has(g.key))
     .sort((a, b) => rank[a.kind] - rank[b.kind] || b.item_ids.length - a.item_ids.length);
 }
@@ -509,9 +472,9 @@ function clusterCard(g: DupGroup, idx: number): string {
 
 function renderTriage() {
   const clusters = visibleClusters();
-  const untriagedItems = allItems.filter((i) => !i.object);
+  const untriagedItems = S.allItems.filter((i) => !i.object);
 
-  const clusterSection = !dupGroups.length
+  const clusterSection = !S.dupGroups.length
     ? `<p class="empty">No duplicates yet — run <b>Classify</b> first.</p>`
     : !clusters.length
       ? `<p class="empty">All clusters resolved or dismissed for this session. 🎉</p>`
@@ -538,22 +501,22 @@ function renderTriage() {
       e.stopPropagation();
       dismissCluster(b.dataset.key!);
     });
-  statusEl.textContent = dupGroups.length
-    ? `${clusters.length} of ${dupGroups.length} cluster(s) · ${untriagedItems.length} untriaged`
+  statusEl.textContent = S.dupGroups.length
+    ? `${clusters.length} of ${S.dupGroups.length} cluster(s) · ${untriagedItems.length} untriaged`
     : "";
 }
 
 function mergeCluster(key: string) {
-  const g = dupGroups.find((d) => d.key === key);
+  const g = S.dupGroups.find((d) => d.key === key);
   if (!g) return;
-  selection.clear();
-  for (const id of g.item_ids) selection.add(id);
+  S.selection.clear();
+  for (const id of g.item_ids) S.selection.add(id);
   renderMain();
   startMerge("create");
 }
 
 function dismissCluster(key: string) {
-  // Optimistic UI: hide immediately, then persist. `dupGroups` (the source list)
+  // Optimistic UI: hide immediately, then persist. `S.dupGroups` (the source list)
   // is also refreshed on next `load()` since the backend now filters dismissed
   // clusters out of `list_duplicates` itself — this local Set just avoids a
   // flash/round-trip before that refresh happens.
@@ -567,7 +530,7 @@ function dismissCluster(key: string) {
 }
 
 function onTriageKey(e: KeyboardEvent) {
-  if (view !== "duplicates") return;
+  if (S.view !== "duplicates") return;
   const tag = (e.target as HTMLElement)?.tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return; // don't steal keys from search/text fields
   const clusters = visibleClusters();
@@ -590,7 +553,7 @@ document.addEventListener("keydown", onTriageKey);
 
 // ---------- Browse keyboard navigation (j/k/arrows + Space select + Enter open) ----------
 function onBrowseKey(e: KeyboardEvent) {
-  if (view !== "library" || !paletteEl.hidden) return;
+  if (S.view !== "library" || !paletteEl.hidden) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return; // don't shadow shortcuts like Ctrl+K
   // Don't steal keys from the search box, modal/detail inputs, or dropdowns.
   const tag = (document.activeElement as HTMLElement | null)?.tagName;
@@ -599,43 +562,43 @@ function onBrowseKey(e: KeyboardEvent) {
   if (!items.length) return;
   if (e.key === "j" || e.key === "ArrowDown") {
     e.preventDefault();
-    cursorIdx = Math.min(cursorIdx + 1, items.length - 1);
+    S.cursorIdx = Math.min(S.cursorIdx + 1, items.length - 1);
     renderList();
     listEl.querySelector(".item.cursor")?.scrollIntoView({ block: "nearest" });
   } else if (e.key === "k" || e.key === "ArrowUp") {
     e.preventDefault();
-    cursorIdx = Math.max(cursorIdx - 1, 0);
+    S.cursorIdx = Math.max(S.cursorIdx - 1, 0);
     renderList();
     listEl.querySelector(".item.cursor")?.scrollIntoView({ block: "nearest" });
   } else if (e.key === " ") {
     e.preventDefault();
-    const it = items[cursorIdx];
+    const it = items[S.cursorIdx];
     if (!it) return;
-    if (selection.has(it.id)) selection.delete(it.id);
-    else selection.add(it.id);
+    if (S.selection.has(it.id)) S.selection.delete(it.id);
+    else S.selection.add(it.id);
     renderList();
     renderSelbar();
   } else if (e.key === "Enter") {
     e.preventDefault();
-    const it = items[cursorIdx];
+    const it = items[S.cursorIdx];
     if (it) openDetail(it.id);
   }
 }
 document.addEventListener("keydown", onBrowseKey);
 
 function renderArchived() {
-  dupesEl.innerHTML = archivedItems.length
-    ? `<ul class="items">${archivedItems.map((it) => itemRow(it, { restore: "archive" })).join("")}</ul>`
+  dupesEl.innerHTML = S.archivedItems.length
+    ? `<ul class="items">${S.archivedItems.map((it) => itemRow(it, { restore: "archive" })).join("")}</ul>`
     : `<p class="empty">No archived items.</p>`;
-  statusEl.textContent = `${archivedItems.length} archived`;
+  statusEl.textContent = `${S.archivedItems.length} archived`;
 }
 
 function renderDeleted() {
-  dupesEl.innerHTML = deletedItems.length
+  dupesEl.innerHTML = S.deletedItems.length
     ? `<p class="nav-note">Deleted items are kept out of re-import. Restore moves the copy back.</p>` +
-      `<ul class="items">${deletedItems.map((it) => itemRow(it, { restore: "delete" })).join("")}</ul>`
+      `<ul class="items">${S.deletedItems.map((it) => itemRow(it, { restore: "delete" })).join("")}</ul>`
     : `<p class="empty">No deleted items.</p>`;
-  statusEl.textContent = `${deletedItems.length} deleted`;
+  statusEl.textContent = `${S.deletedItems.length} deleted`;
 }
 
 // ---------- dashboard ----------
@@ -644,13 +607,13 @@ function statCard(label: string, value: string | number, tone?: "warn" | "ok" | 
 }
 
 function renderDashboard() {
-  const total = allItems.length;
-  const classified = allItems.filter((i) => i.object).length;
+  const total = S.allItems.length;
+  const classified = S.allItems.filter((i) => i.object).length;
   const pct = total ? Math.round((classified / total) * 100) : 0;
-  const exact = dupGroups.filter((g) => g.kind === "exact").length;
-  const near = dupGroups.filter((g) => g.kind === "near").length;
+  const exact = S.dupGroups.filter((g) => g.kind === "exact").length;
+  const near = S.dupGroups.filter((g) => g.kind === "near").length;
   const untriaged = total - classified;
-  const variants = allItems.filter((i) => i.has_variants).length;
+  const variants = S.allItems.filter((i) => i.has_variants).length;
 
   const strip =
     `<div class="stat-row">` +
@@ -661,7 +624,7 @@ function renderDashboard() {
     statCard("Flagged variants", variants, variants ? "warn" : "ok") +
     `</div>`;
 
-  const topClusters = [...dupGroups]
+  const topClusters = [...S.dupGroups]
     .sort((a, b) => b.item_ids.length - a.item_ids.length)
     .slice(0, 5);
   const clusterRows = topClusters.length
@@ -678,13 +641,13 @@ function renderDashboard() {
   const actions =
     `<div class="add-row">` +
     `<button id="dash-import" class="add-btn">⟳ Scan &amp; import</button>` +
-    `<button id="dash-classify" class="add-btn"${aiOk ? "" : " disabled"}>✦ Classify ${untriaged ? `(${untriaged})` : ""}</button>` +
-    `<button id="dash-triage" class="add-btn">Go to Triage (${dupGroups.length})</button>` +
+    `<button id="dash-classify" class="add-btn"${S.aiOk ? "" : " disabled"}>✦ Classify ${untriaged ? `(${untriaged})` : ""}</button>` +
+    `<button id="dash-triage" class="add-btn">Go to Triage (${S.dupGroups.length})</button>` +
     `</div>`;
 
-  const activityHtml = activityFeed.length
+  const activityHtml = S.activityFeed.length
     ? `<ul class="dash-list">` +
-      activityFeed
+      S.activityFeed
         .map(
           ([, kind, summary, at]) =>
             `<li class="dash-cluster"><span class="chip verb">${esc(kind)}</span> ` +
@@ -694,7 +657,7 @@ function renderDashboard() {
       `</ul>`
     : `<p class="nav-note">No activity yet.</p>`;
 
-  const staleCount = allItems.filter((i) => i.use_count === 0 && !i.archived).length;
+  const staleCount = S.allItems.filter((i) => i.use_count === 0 && !i.archived).length;
   const staleHtml = staleCount
     ? `<p class="nav-note">${staleCount} item(s) have never been marked used — <b>candidates for deletion</b>. ` +
       `Open an item and click ✓ to mark it used, or use them from the Browse list.</p>`
@@ -718,18 +681,18 @@ function renderDashboard() {
 async function renderDeploy() {
   deployEl.innerHTML = `<h2 class="dash-h">Deploy — locations</h2><p class="nav-note">Loading…</p>`;
   try {
-    deployStatuses = await deployStatus();
+    S.deployStatuses = await deployStatus();
   } catch (e) {
     deployEl.innerHTML = `<h2 class="dash-h">Deploy — locations</h2><p class="nav-note">Error: ${esc(String(e))}</p>`;
     return;
   }
-  if (!deployStatuses.length) {
+  if (!S.deployStatuses.length) {
     deployEl.innerHTML =
       `<h2 class="dash-h">Deploy — locations</h2>` +
       `<p class="empty">No tracked locations yet — run <b>Scan &amp; import</b> first.</p>`;
     return;
   }
-  const cards = deployStatuses
+  const cards = S.deployStatuses
     .map((l) => {
       const healthy = l.drifted === 0 && l.missing === 0;
       return (
@@ -772,7 +735,7 @@ async function renderDeploy() {
     : `<h2 class="dash-h">Conflict inbox</h2><p class="nav-note">No conflicts — every deployed copy can sync cleanly. ✓</p>`;
 
   deployEl.innerHTML =
-    `<h2 class="dash-h">Deploy — locations (${deployStatuses.length})</h2>` +
+    `<h2 class="dash-h">Deploy — locations (${S.deployStatuses.length})</h2>` +
     `<p class="nav-note">Bird's-eye sync status per tracked location. Open an item's detail pane (Browse) for the per-item diff/push/pull actions.</p>` +
     `<div class="deploy-grid">${cards}</div>` +
     conflictSection;
@@ -813,32 +776,32 @@ async function renderDeploy() {
 }
 
 function renderMain() {
-  dashboardEl.hidden = view !== "dashboard";
-  deployEl.hidden = view !== "deploy";
-  listEl.hidden = view !== "library";
-  dupesEl.hidden = view === "dashboard" || view === "library" || view === "deploy";
+  dashboardEl.hidden = S.view !== "dashboard";
+  deployEl.hidden = S.view !== "deploy";
+  listEl.hidden = S.view !== "library";
+  dupesEl.hidden = S.view === "dashboard" || S.view === "library" || S.view === "deploy";
   emptyEl.hidden = true;
-  if (view === "dashboard") renderDashboard();
-  else if (view === "deploy") renderDeploy();
-  else if (view === "library") renderList();
-  else if (view === "duplicates") renderTriage();
-  else if (view === "archived") renderArchived();
+  if (S.view === "dashboard") renderDashboard();
+  else if (S.view === "deploy") renderDeploy();
+  else if (S.view === "library") renderList();
+  else if (S.view === "duplicates") renderTriage();
+  else if (S.view === "archived") renderArchived();
   else renderDeleted();
   renderSelbar();
 }
 
 // ---------- detail / preview ----------
 function closeDetail() {
-  selectedId = null;
+  S.selectedId = null;
   detailEl.hidden = true;
   detailEl.innerHTML = "";
   renderMain();
 }
 
 async function openDetail(id: number) {
-  const it = itemById(id) ?? archivedItems.find((i) => i.id === id);
+  const it = itemById(id) ?? S.archivedItems.find((i) => i.id === id);
   if (!it) return;
-  selectedId = id;
+  S.selectedId = id;
   renderMain();
   detailEl.hidden = false;
   detailEl.innerHTML =
@@ -903,7 +866,7 @@ async function openDetail(id: number) {
 function renderTagPanel(id: number) {
   const el = document.getElementById("tag-panel");
   if (!el) return;
-  const tags = itemTagsMap.get(id) ?? [];
+  const tags = S.itemTagsMap.get(id) ?? [];
   const chipsHtml = tags.length
     ? tags
         .map(
@@ -922,7 +885,7 @@ function renderTagPanel(id: number) {
     try {
       await addItemTag(id, t);
       await load();
-      if (selectedId === id) renderTagPanel(id);
+      if (S.selectedId === id) renderTagPanel(id);
       statusEl.textContent = `Tagged #${t.toLowerCase()}`;
     } catch (e) {
       statusEl.textContent = `Error: ${e}`;
@@ -937,7 +900,7 @@ function renderTagPanel(id: number) {
       try {
         await removeItemTag(id, b.dataset.tag!);
         await load();
-        if (selectedId === id) renderTagPanel(id);
+        if (S.selectedId === id) renderTagPanel(id);
       } catch (e) {
         statusEl.textContent = `Error: ${e}`;
       }
@@ -1023,7 +986,7 @@ function openRefine(id: number) {
 
 async function runRefine(id: number, name: string) {
   const rfStatus = document.getElementById("rf-status")!;
-  if (!aiOk) {
+  if (!S.aiOk) {
     rfStatus.textContent = "Set a valid OPENAI_API_KEY (then restart) to refine.";
     return;
   }
@@ -1087,12 +1050,12 @@ function showRefineDiff(id: number, name: string, res: RefineResult) {
 type BatchProposal = { id: number; name: string; original: string; proposed: string };
 
 function startBatchRefine() {
-  if (!aiOk) {
+  if (!S.aiOk) {
     statusEl.textContent = "Set a valid OPENAI_API_KEY (then restart) to refactor.";
     return;
   }
-  if (!selection.size) return;
-  const ids = [...selection];
+  if (!S.selection.size) return;
+  const ids = [...S.selection];
   // Reuse the single-item directive picker UI, but wire the Run button to the batch runner.
   detailEl.hidden = false;
   detailEl.innerHTML =
@@ -1149,7 +1112,7 @@ async function runBatchRefine(ids: number[]) {
 
 function reviewBatch(proposals: BatchProposal[], idx: number) {
   if (idx >= proposals.length) {
-    selection.clear();
+    S.selection.clear();
     detailEl.hidden = true;
     detailEl.innerHTML = "";
     load().then(() => (statusEl.textContent = `Batch refactor complete (${proposals.length} reviewed).`));
@@ -1179,12 +1142,12 @@ function reviewBatch(proposals: BatchProposal[], idx: number) {
 type MergeMode = "create" | "delete";
 
 async function startMerge(mode: MergeMode) {
-  if (selection.size < 2) return;
-  if (!aiOk) {
+  if (S.selection.size < 2) return;
+  if (!S.aiOk) {
     statusEl.textContent = "Set a valid OPENAI_API_KEY (then restart) to merge.";
     return;
   }
-  const ids = [...selection];
+  const ids = [...S.selection];
   statusEl.textContent = "Merging…";
   try {
     showMergeReview(ids, mode, await mergeItems(ids));
@@ -1207,7 +1170,7 @@ function showMergeReview(ids: number[], mode: MergeMode, res: MergeResult) {
     const name = (document.getElementById("mg-name") as HTMLInputElement).value.trim() || "merged";
     try {
       const newId = await saveMerge(ids, res.proposed, name, mode);
-      selection.clear();
+      S.selection.clear();
       await load();
       openDetail(newId);
       statusEl.textContent = del
@@ -1223,15 +1186,15 @@ function showMergeReview(ids: number[], mode: MergeMode, res: MergeResult) {
 }
 
 async function archiveSelected() {
-  const ids = [...selection];
+  const ids = [...S.selection];
   for (const id of ids) await archiveItem(id, true);
-  selection.clear();
+  S.selection.clear();
   await load();
   statusEl.textContent = `Archived ${ids.length} item(s).`;
 }
 
 async function exportSelected() {
-  const ids = [...selection];
+  const ids = [...S.selection];
   if (!ids.length) return;
   const dest = await save({
     title: "Export selected items",
@@ -1249,11 +1212,11 @@ async function exportSelected() {
 }
 
 async function deleteSelected() {
-  const ids = [...selection];
+  const ids = [...S.selection];
   if (!ids.length) return;
   try {
     await deleteItems(ids);
-    selection.clear();
+    S.selection.clear();
     await load();
     statusEl.textContent = `Deleted ${ids.length} item(s) — restore from the Deleted view.`;
   } catch (e) {
@@ -1263,16 +1226,16 @@ async function deleteSelected() {
 }
 
 async function classifySelected() {
-  if (!aiOk) {
+  if (!S.aiOk) {
     statusEl.textContent = "Set a valid OPENAI_API_KEY (then restart) to classify.";
     return;
   }
-  const ids = [...selection];
+  const ids = [...S.selection];
   if (!ids.length) return;
   statusEl.textContent = `Classifying ${ids.length} selected…`;
   try {
     const s = await classifyAll(ids);
-    selection.clear();
+    S.selection.clear();
     await load();
     statusEl.textContent = `Classified ${s.classified} selected`;
   } catch (e) {
@@ -1293,41 +1256,41 @@ async function load() {
     listItemTags(),
     listAllTags(),
   ]);
-  allItems = items;
-  archivedItems = arch;
-  deletedItems = del;
-  scanDirs = dirs;
-  aiOk = ok;
-  verbMap = vmap;
-  dupGroups = dups;
-  itemTagsMap = new Map();
+  S.allItems = items;
+  S.archivedItems = arch;
+  S.deletedItems = del;
+  S.scanDirs = dirs;
+  S.aiOk = ok;
+  S.verbMap = vmap;
+  S.dupGroups = dups;
+  S.itemTagsMap = new Map();
   for (const [id, tag] of tagPairs) {
-    const list = itemTagsMap.get(id) ?? [];
+    const list = S.itemTagsMap.get(id) ?? [];
     list.push(tag);
-    itemTagsMap.set(id, list);
+    S.itemTagsMap.set(id, list);
   }
-  allTags = tagList;
+  S.allTags = tagList;
   try {
-    [uncanonicalVerbs, canonVerbList] = await Promise.all([listUncanonicalVerbs(), canonicalVerbs()]);
+    [S.uncanonicalVerbs, S.canonVerbList] = await Promise.all([listUncanonicalVerbs(), canonicalVerbs()]);
   } catch {
-    uncanonicalVerbs = [];
-    canonVerbList = [];
+    S.uncanonicalVerbs = [];
+    S.canonVerbList = [];
   }
   try {
-    activityFeed = await recentActivity();
+    S.activityFeed = await recentActivity();
   } catch {
-    activityFeed = [];
+    S.activityFeed = [];
   }
-  for (const id of [...selection]) if (!allItems.some((i) => i.id === id)) selection.delete(id);
+  for (const id of [...S.selection]) if (!S.allItems.some((i) => i.id === id)) S.selection.delete(id);
   // If the item open in the detail pane was just removed (deleted/merged away),
   // close the pane so it can't show or act on stale/tombstoned content.
-  if (selectedId !== null && !itemById(selectedId) && !archivedItems.some((i) => i.id === selectedId)) {
-    selectedId = null;
+  if (S.selectedId !== null && !itemById(S.selectedId) && !S.archivedItems.some((i) => i.id === S.selectedId)) {
+    S.selectedId = null;
     detailEl.hidden = true;
     detailEl.innerHTML = "";
   }
-  classifyBtn.disabled = !aiOk;
-  classifyBtn.title = aiOk ? "Classify with AI" : "Set OPENAI_API_KEY to enable";
+  classifyBtn.disabled = !S.aiOk;
+  classifyBtn.title = S.aiOk ? "Classify with AI" : "Set OPENAI_API_KEY to enable";
   renderModebar();
   renderFilters();
   renderSources();
@@ -1339,8 +1302,8 @@ function onRowClick(e: Event) {
   const t = e.target as HTMLElement;
   if (t.classList.contains("sel")) {
     const id = Number((t as HTMLInputElement).dataset.id);
-    if (selection.has(id)) selection.delete(id);
-    else selection.add(id);
+    if (S.selection.has(id)) S.selection.delete(id);
+    else S.selection.add(id);
     renderSelbar();
     return;
   }
@@ -1357,9 +1320,9 @@ listEl.addEventListener("click", onRowClick);
 dupesEl.addEventListener("click", onRowClick);
 
 searchEl.addEventListener("input", () => {
-  query = searchEl.value;
-  cursorIdx = 0;
-  if (query.trim() && view !== "library") view = "library";
+  S.query = searchEl.value;
+  S.cursorIdx = 0;
+  if (S.query.trim() && S.view !== "library") S.view = "library";
   renderModebar();
   renderFilters();
   renderMain();
@@ -1377,11 +1340,11 @@ importBtn.addEventListener("click", async () => {
   statusEl.textContent = "Importing… (scanning locations + tarball)";
   try {
     const s = await runImport(); // resolves on done OR cancel; s.cancelled says which
-    lastScanAt = Date.now(); // completed scan (incl. cancelled partials) — resets the auto-scan clock
+    S.lastScanAt = Date.now(); // completed scan (incl. cancelled partials) — resets the auto-scan clock
     await load();
     statusEl.textContent = s.cancelled
-      ? `Cancelled — kept ${s.items_new} new (partial, re-runnable) · ${allItems.length} total`
-      : `Imported ${s.items_new} new · ${s.variants_flagged} variants · ${allItems.length} total`;
+      ? `Cancelled — kept ${s.items_new} new (partial, re-runnable) · ${S.allItems.length} total`
+      : `Imported ${s.items_new} new · ${s.variants_flagged} variants · ${S.allItems.length} total`;
   } catch (e) {
     statusEl.textContent = `Error: ${e}`;
   } finally {
@@ -1402,17 +1365,18 @@ cancelBtn.addEventListener("click", async () => {
 
 // ---------- auto-scan on window focus ----------
 // If the app regains focus after sitting idle for AUTO_SCAN_AFTER_MS, kick off
+const AUTO_SCAN_AFTER_MS = 5 * 60 * 1000; // 5 minutes
 // the same scan/import as clicking the Scan & import button — unless an import
 // is already running or the onboarding wizard is open.
 window.addEventListener("focus", () => {
-  if (Date.now() - lastScanAt <= AUTO_SCAN_AFTER_MS) return;
+  if (Date.now() - S.lastScanAt <= AUTO_SCAN_AFTER_MS) return;
   if (importBtn.disabled || document.body.classList.contains("importing")) return; // import in flight
-  if (onboardingOpen) return;
+  if (S.onboardingOpen) return;
   importBtn.click();
 });
 
 classifyBtn.addEventListener("click", async () => {
-  if (!aiOk) {
+  if (!S.aiOk) {
     statusEl.textContent = "Set a valid OPENAI_API_KEY, then restart, to classify.";
     return;
   }
@@ -1450,19 +1414,19 @@ function paletteActions(): PaletteAction[] {
   const acts: PaletteAction[] = [
     { label: "Go to Dashboard", run: () => goToView("dashboard") },
     { label: "Go to Browse", run: () => goToView("library") },
-    { label: "Go to Triage", hint: `${dupGroups.length} cluster(s)`, run: () => goToView("duplicates") },
+    { label: "Go to Triage", hint: `${S.dupGroups.length} cluster(s)`, run: () => goToView("duplicates") },
     { label: "Go to Deploy", run: () => goToView("deploy") },
-    { label: "Go to Archived", hint: `${archivedItems.length}`, run: () => goToView("archived") },
-    { label: "Go to Deleted", hint: `${deletedItems.length}`, run: () => goToView("deleted") },
+    { label: "Go to Archived", hint: `${S.archivedItems.length}`, run: () => goToView("archived") },
+    { label: "Go to Deleted", hint: `${S.deletedItems.length}`, run: () => goToView("deleted") },
     { label: "Scan & import", run: () => importBtn.click() },
     { label: "Open Settings", run: () => openSettings() },
-    { label: "Export selected items", hint: `${selection.size} selected`, run: () => exportSelected() },
-    { label: "Batch refactor selected", hint: `${selection.size} selected`, run: () => startBatchRefine() },
+    { label: "Export selected items", hint: `${S.selection.size} selected`, run: () => exportSelected() },
+    { label: "Batch refactor selected", hint: `${S.selection.size} selected`, run: () => startBatchRefine() },
   ];
-  if (aiOk) acts.push({ label: "Classify all unclassified items", run: () => classifyBtn.click() });
-  if (selection.size >= 2) {
-    acts.push({ label: `Merge ${selection.size} selected → New`, run: () => startMerge("create") });
-    acts.push({ label: `Merge ${selection.size} selected → Delete sources`, run: () => startMerge("delete") });
+  if (S.aiOk) acts.push({ label: "Classify all unclassified items", run: () => classifyBtn.click() });
+  if (S.selection.size >= 2) {
+    acts.push({ label: `Merge ${S.selection.size} selected → New`, run: () => startMerge("create") });
+    acts.push({ label: `Merge ${S.selection.size} selected → Delete sources`, run: () => startMerge("delete") });
   }
   return acts;
 }
@@ -1495,7 +1459,7 @@ function renderPalette() {
         .sort((x, y) => y.s - x.s || x.i - y.i)
         .map((x) => x.a)
     : paletteActions();
-  const items = q ? allItems.filter((it) => paletteItemMatches(it, q)).slice(0, 20) : [];
+  const items = q ? S.allItems.filter((it) => paletteItemMatches(it, q)).slice(0, 20) : [];
 
   const rows: string[] = [];
   actions.forEach((a, i) => {
@@ -1593,7 +1557,7 @@ async function maybeOnboard() {
     done = true; // never block startup on a status-check failure
   }
   if (done) return;
-  onboardingOpen = true;
+  S.onboardingOpen = true;
   detailEl.hidden = false;
   const [stored, env] = await apiKeyStatus().catch(() => [false, false] as [boolean, boolean]);
   const keyLine = stored || env
@@ -1628,7 +1592,7 @@ async function maybeOnboard() {
     const key = el?.value.trim();
     if (key) {
       await setApiKey(key);
-      aiOk = await aiAvailable();
+      S.aiOk = await aiAvailable();
     }
   };
   document.getElementById("ob-finish")!.addEventListener("click", async () => {
@@ -1636,7 +1600,7 @@ async function maybeOnboard() {
     try {
       await saveKeyIfAny();
       await setOnboarded();
-      onboardingOpen = false;
+      S.onboardingOpen = false;
       closeDetail();
       importBtn.click(); // kick off the first scan/import
     } catch (e) {
@@ -1650,7 +1614,7 @@ async function maybeOnboard() {
     } catch {
       /* ignore */
     }
-    onboardingOpen = false;
+    S.onboardingOpen = false;
     closeDetail();
   });
 }
