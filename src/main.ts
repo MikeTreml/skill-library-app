@@ -116,6 +116,13 @@ let objectFilter: string | null = null;
 let query = "";
 let selectedId: number | null = null;
 const selection = new Set<number>();
+// Browse keyboard navigation: index of the highlighted row within visibleItems().
+let cursorIdx = 0;
+// Auto-scan on window focus: re-scan when the app regains focus after this long.
+const AUTO_SCAN_AFTER_MS = 5 * 60 * 1000; // 5 minutes
+// Initialize to "now" so the initial app load never triggers an auto-scan.
+let lastScanAt = Date.now();
+let onboardingOpen = false;
 
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -244,17 +251,20 @@ function renderFilters() {
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-type]"))
     b.addEventListener("click", () => {
       typeFilter = b.dataset.type as TypeFilter;
+      cursorIdx = 0;
       renderFilters();
       renderMain();
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-object]"))
     b.addEventListener("click", () => {
       objectFilter = b.dataset.object === "" ? null : b.dataset.object!;
+      cursorIdx = 0;
       goToView("library");
     });
   for (const b of filtersEl.querySelectorAll<HTMLButtonElement>("[data-tag]"))
     b.addEventListener("click", () => {
       tagFilter = b.dataset.tag === "" ? null : b.dataset.tag!;
+      cursorIdx = 0;
       goToView("library");
     });
   const objTree = document.getElementById("obj-tree") as HTMLDetailsElement | null;
@@ -390,7 +400,10 @@ function chips(it: Item): string {
   return c.join("");
 }
 
-function itemRow(it: Item, opts: { select?: boolean; restore?: "archive" | "delete" } = {}): string {
+function itemRow(
+  it: Item,
+  opts: { select?: boolean; restore?: "archive" | "delete"; cursor?: boolean } = {},
+): string {
   const cb = opts.select
     ? `<input type="checkbox" class="sel" data-id="${it.id}"${selection.has(it.id) ? " checked" : ""} />`
     : "";
@@ -398,7 +411,7 @@ function itemRow(it: Item, opts: { select?: boolean; restore?: "archive" | "dele
     ? `<button class="restore" data-id="${it.id}" data-kind="${opts.restore}">Restore</button>`
     : "";
   return (
-    `<li class="item${it.id === selectedId ? " active" : ""}" data-id="${it.id}">${cb}` +
+    `<li class="item${it.id === selectedId ? " active" : ""}${opts.cursor ? " cursor" : ""}" data-id="${it.id}">${cb}` +
     `<span class="badge ${it.item_type}">${it.item_type}</span><span class="name">${esc(it.name)}</span>${chips(it)}` +
     `<span class="desc">${esc(it.description)}</span>${restore}</li>`
   );
@@ -452,7 +465,8 @@ function renderSelbar() {
 
 function renderList() {
   const items = visibleItems();
-  listEl.innerHTML = items.map((it) => itemRow(it, { select: true })).join("");
+  if (cursorIdx > items.length - 1) cursorIdx = Math.max(0, items.length - 1);
+  listEl.innerHTML = items.map((it, i) => itemRow(it, { select: true, cursor: i === cursorIdx })).join("");
   emptyEl.hidden = allItems.length > 0;
   statusEl.textContent = allItems.length ? `${items.length} of ${allItems.length} items` : "";
 }
@@ -570,6 +584,41 @@ function onTriageKey(e: KeyboardEvent) {
   }
 }
 document.addEventListener("keydown", onTriageKey);
+
+// ---------- Browse keyboard navigation (j/k/arrows + Space select + Enter open) ----------
+function onBrowseKey(e: KeyboardEvent) {
+  if (view !== "library" || !paletteEl.hidden) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return; // don't shadow shortcuts like Ctrl+K
+  // Don't steal keys from the search box, modal/detail inputs, or dropdowns.
+  const tag = (document.activeElement as HTMLElement | null)?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const items = visibleItems();
+  if (!items.length) return;
+  if (e.key === "j" || e.key === "ArrowDown") {
+    e.preventDefault();
+    cursorIdx = Math.min(cursorIdx + 1, items.length - 1);
+    renderList();
+    listEl.querySelector(".item.cursor")?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "k" || e.key === "ArrowUp") {
+    e.preventDefault();
+    cursorIdx = Math.max(cursorIdx - 1, 0);
+    renderList();
+    listEl.querySelector(".item.cursor")?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === " ") {
+    e.preventDefault();
+    const it = items[cursorIdx];
+    if (!it) return;
+    if (selection.has(it.id)) selection.delete(it.id);
+    else selection.add(it.id);
+    renderList();
+    renderSelbar();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const it = items[cursorIdx];
+    if (it) openDetail(it.id);
+  }
+}
+document.addEventListener("keydown", onBrowseKey);
 
 function renderArchived() {
   dupesEl.innerHTML = archivedItems.length
@@ -1266,6 +1315,7 @@ dupesEl.addEventListener("click", onRowClick);
 
 searchEl.addEventListener("input", () => {
   query = searchEl.value;
+  cursorIdx = 0;
   if (query.trim() && view !== "library") view = "library";
   renderModebar();
   renderFilters();
@@ -1284,6 +1334,7 @@ importBtn.addEventListener("click", async () => {
   statusEl.textContent = "Importing… (scanning locations + tarball)";
   try {
     const s = await runImport(); // resolves on done OR cancel; s.cancelled says which
+    lastScanAt = Date.now(); // completed scan (incl. cancelled partials) — resets the auto-scan clock
     await load();
     statusEl.textContent = s.cancelled
       ? `Cancelled — kept ${s.items_new} new (partial, re-runnable) · ${allItems.length} total`
@@ -1304,6 +1355,17 @@ cancelBtn.addEventListener("click", async () => {
   } catch (e) {
     statusEl.textContent = `Error: ${e}`;
   }
+});
+
+// ---------- auto-scan on window focus ----------
+// If the app regains focus after sitting idle for AUTO_SCAN_AFTER_MS, kick off
+// the same scan/import as clicking the Scan & import button — unless an import
+// is already running or the onboarding wizard is open.
+window.addEventListener("focus", () => {
+  if (Date.now() - lastScanAt <= AUTO_SCAN_AFTER_MS) return;
+  if (importBtn.disabled || document.body.classList.contains("importing")) return; // import in flight
+  if (onboardingOpen) return;
+  importBtn.click();
 });
 
 classifyBtn.addEventListener("click", async () => {
@@ -1373,9 +1435,41 @@ function paletteItemMatches(it: Item, q: string): boolean {
 
 let paletteFocus = 0;
 
+// Subsequence fuzzy match: every char of `query` must appear in `target` in
+// order (case-insensitive). Returns -1 on no match; otherwise a score that
+// rewards consecutive-char runs and matches at the start of the target or of
+// a word. Pure — no side effects.
+function fuzzyScore(query: string, target: string): number {
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  if (!q) return 0;
+  let score = 0;
+  let searchFrom = 0;
+  let prevMatch = -2;
+  for (const ch of q) {
+    const idx = t.indexOf(ch, searchFrom);
+    if (idx === -1) return -1; // chars not all present in order
+    score += 1; // base point per matched char
+    if (idx === prevMatch + 1) score += 2; // consecutive run
+    if (idx === 0) score += 3; // start of target
+    else if (!/[a-z0-9]/.test(t[idx - 1])) score += 2; // word boundary
+    prevMatch = idx;
+    searchFrom = idx + 1;
+  }
+  return score;
+}
+
 function renderPalette() {
   const q = paletteInputEl.value.trim().toLowerCase();
-  const actions = q ? paletteActions().filter((a) => a.label.toLowerCase().includes(q)) : paletteActions();
+  // Empty query: all actions in original order. Otherwise fuzzy-match and sort
+  // by score descending, keeping the original order for equal scores (stable).
+  const actions = q
+    ? paletteActions()
+        .map((a, i) => ({ a, i, s: fuzzyScore(q, a.label) }))
+        .filter((x) => x.s >= 0)
+        .sort((x, y) => y.s - x.s || x.i - y.i)
+        .map((x) => x.a)
+    : paletteActions();
   const items = q ? allItems.filter((it) => paletteItemMatches(it, q)).slice(0, 20) : [];
 
   const rows: string[] = [];
@@ -1474,6 +1568,7 @@ async function maybeOnboard() {
     done = true; // never block startup on a status-check failure
   }
   if (done) return;
+  onboardingOpen = true;
   detailEl.hidden = false;
   const [stored, env] = await apiKeyStatus().catch(() => [false, false] as [boolean, boolean]);
   const keyLine = stored || env
@@ -1516,6 +1611,7 @@ async function maybeOnboard() {
     try {
       await saveKeyIfAny();
       await setOnboarded();
+      onboardingOpen = false;
       closeDetail();
       importBtn.click(); // kick off the first scan/import
     } catch (e) {
@@ -1529,6 +1625,7 @@ async function maybeOnboard() {
     } catch {
       /* ignore */
     }
+    onboardingOpen = false;
     closeDetail();
   });
 }

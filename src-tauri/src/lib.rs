@@ -94,6 +94,7 @@ pub fn run() {
             commands::deploy_status,
             commands::read_placement,
             commands::push_to_location,
+            commands::push_all_to_location,
             commands::pull_from_location,
         ])
         .run(tauri::generate_context!())

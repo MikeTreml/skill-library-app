@@ -327,6 +327,35 @@ pub fn placements_for_conflict_check(conn: &Connection) -> rusqlite::Result<Vec<
     rows.collect()
 }
 
+/// The conflict-check rows for a single location — same shape as
+/// `placements_for_conflict_check`, filtered to one `location_id`. Feeds the
+/// Deploy-mode batch push, which must decide per placement whether pushing
+/// over the deployed copy is safe.
+pub fn placements_for_conflict_check_by_location(
+    conn: &Connection,
+    location_id: i64,
+) -> rusqlite::Result<Vec<ConflictCheckRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, l.label, l.root_path, p.rel_path, i.canonical_hash, p.location_hash
+         FROM placements p
+         JOIN locations l ON p.location_id = l.id
+         JOIN items i ON p.item_id = i.id
+         WHERE i.deleted = 0 AND p.location_id = ?1
+         ORDER BY p.id",
+    )?;
+    let rows = stmt.query_map(params![location_id], |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    })?;
+    rows.collect()
+}
+
 /// (item_id, root_path, rel_path) for one placement.
 pub fn placement_paths(
     conn: &Connection,
@@ -690,6 +719,15 @@ pub fn set_verb(conn: &Connection, item_id: i64, verb: &str) -> rusqlite::Result
         params![item_id, verb],
     )?;
     Ok(())
+}
+
+/// The label of one location, for activity-log summaries.
+pub fn location_label(conn: &Connection, location_id: i64) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT label FROM locations WHERE id = ?1",
+        params![location_id],
+        |r| r.get(0),
+    )
 }
 
 pub fn list_locations(conn: &Connection) -> rusqlite::Result<Vec<Location>> {

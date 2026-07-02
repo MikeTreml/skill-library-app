@@ -611,18 +611,87 @@ pub fn read_placement(state: State<AppState>, placement_id: i64) -> Result<Strin
     read_library_content(&placement_abs(&root, &rel).to_string_lossy()).map_err(|e| e.to_string())
 }
 
+/// Per-placement push mechanics shared by `push_to_location` and
+/// `push_all_to_location`: back up whatever is at the target, copy the library
+/// copy over it, and record the placement as in_sync at the item's canonical hash.
+fn push_placement(
+    conn: &rusqlite::Connection,
+    library_root: &Path,
+    placement_id: i64,
+    item_id: i64,
+    abs: &Path,
+) -> Result<(), String> {
+    let lib_path = db::item_library_path(conn, item_id).map_err(|e| e.to_string())?;
+    backup_before_overwrite(library_root, placement_id, abs)?;
+    copy_over(Path::new(&lib_path), abs)?;
+    let canonical = db::item_canonical_hash(conn, item_id).map_err(|e| e.to_string())?;
+    db::update_placement_sync(conn, placement_id, &canonical, "in_sync").map_err(|e| e.to_string())
+}
+
 /// Push the library copy OUT to the location (location := library); backs up the location first.
 #[tauri::command]
 pub fn push_to_location(state: State<AppState>, placement_id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let (item_id, root, rel) =
         db::placement_paths(&conn, placement_id).map_err(|e| e.to_string())?;
-    let lib_path = db::item_library_path(&conn, item_id).map_err(|e| e.to_string())?;
     let abs = placement_abs(&root, &rel);
-    backup_before_overwrite(&state.library_root, placement_id, &abs)?;
-    copy_over(Path::new(&lib_path), &abs)?;
-    let canonical = db::item_canonical_hash(&conn, item_id).map_err(|e| e.to_string())?;
-    db::update_placement_sync(&conn, placement_id, &canonical, "in_sync").map_err(|e| e.to_string())
+    push_placement(&conn, &state.library_root, placement_id, item_id, &abs)
+}
+
+/// Deploy-mode batch push: push the library copy out to EVERY placement of one
+/// location, except placements that are already in sync (skipped_ok) or in a
+/// genuine 3-way conflict (skipped_conflicts — never overwritten; the conflict
+/// inbox resolves those explicitly). Returns (pushed, skipped_conflicts, skipped_ok).
+#[tauri::command]
+pub fn push_all_to_location(
+    state: State<AppState>,
+    location_id: i64,
+) -> Result<(u32, u32, u32), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    push_all_placements(&conn, &state.library_root, location_id)
+}
+
+/// Testable core of `push_all_to_location` (no Tauri runtime needed).
+fn push_all_placements(
+    conn: &rusqlite::Connection,
+    library_root: &Path,
+    location_id: i64,
+) -> Result<(u32, u32, u32), String> {
+    let rows = db::placements_for_conflict_check_by_location(conn, location_id)
+        .map_err(|e| e.to_string())?;
+    let (mut pushed, mut skipped_conflicts, mut skipped_ok) = (0u32, 0u32, 0u32);
+    for (pid, _label, root, rel, canonical, baseline) in rows {
+        let abs = placement_abs(&root, &rel);
+        match sync_status(&canonical, &abs).as_str() {
+            "in_sync" => {
+                skipped_ok += 1;
+                continue;
+            }
+            "missing" => {} // no disk copy to conflict with — push fills the gap
+            _ => {
+                // Drifted (or unreadable): only push if it is NOT a 3-way conflict,
+                // i.e. the deployed copy is still clean relative to the baseline.
+                let disk = match crate::hash::hash_path(&abs) {
+                    Ok(h) => h,
+                    Err(e) => return Err(e.to_string()),
+                };
+                if is_three_way_conflict(&baseline, &canonical, &disk) {
+                    skipped_conflicts += 1;
+                    continue;
+                }
+            }
+        }
+        let (item_id, _, _) = db::placement_paths(conn, pid).map_err(|e| e.to_string())?;
+        push_placement(conn, library_root, pid, item_id, &abs)?;
+        pushed += 1;
+    }
+    let label = db::location_label(conn, location_id).map_err(|e| e.to_string())?;
+    let _ = db::log_activity(
+        conn,
+        "deploy",
+        &format!("Pushed {pushed} item(s) to {label} ({skipped_conflicts} conflicts skipped)"),
+    );
+    Ok((pushed, skipped_conflicts, skipped_ok))
 }
 
 /// Pull the location copy INTO the library (library := location); backs up the library first.
@@ -1304,6 +1373,113 @@ mod tests {
         fs::write(&f, "changed").unwrap();
         assert_eq!(sync_status(&h, &f), "drifted");
         assert_eq!(sync_status(&h, &d.path().join("missing.md")), "missing");
+    }
+
+    #[test]
+    fn push_all_pushes_missing_and_clean_drift_but_skips_conflicts_and_in_sync() {
+        let lib = tempfile::tempdir().unwrap();
+        let loc = tempfile::tempdir().unwrap();
+        let conn = db::open_in_memory().unwrap();
+        let loc_id = db::upsert_location(
+            &conn,
+            "Test loc",
+            loc.path().to_str().unwrap(),
+            LocationKind::ClaudeSkills,
+        )
+        .unwrap();
+
+        // A library skill folder with SKILL.md content → (item_id, canonical_hash).
+        let mk_item = |slug: &str, content: &str| -> (i64, String) {
+            let folder = lib.path().join(slug);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("SKILL.md"), content).unwrap();
+            let hash = crate::hash::hash_path(&folder).unwrap();
+            let (id, _) = db::insert_item_if_absent(
+                &conn,
+                ItemType::Skill,
+                slug,
+                slug,
+                "d",
+                &hash,
+                folder.to_str().unwrap(),
+            )
+            .unwrap();
+            (id, hash)
+        };
+
+        // 1) Missing target: library copy exists, nothing deployed yet → push.
+        let (missing_id, missing_hash) = mk_item("missing-item", "LIB MISSING");
+        db::upsert_placement(
+            &conn,
+            missing_id,
+            loc_id,
+            "missing-item",
+            &missing_hash,
+            "missing",
+        )
+        .unwrap();
+
+        // 2) Stale with clean baseline: disk still matches the recorded baseline,
+        //    only the library moved on → safe to push.
+        let (stale_id, _) = mk_item("stale-item", "LIB NEW");
+        let stale_disk = loc.path().join("stale-item");
+        fs::create_dir_all(&stale_disk).unwrap();
+        fs::write(stale_disk.join("SKILL.md"), "OLD DEPLOYED").unwrap();
+        let old_baseline = crate::hash::hash_path(&stale_disk).unwrap();
+        db::upsert_placement(
+            &conn,
+            stale_id,
+            loc_id,
+            "stale-item",
+            &old_baseline,
+            "drifted",
+        )
+        .unwrap();
+
+        // 3) Genuine 3-way conflict: baseline differs from BOTH library and disk → skip.
+        let (conflict_id, _) = mk_item("conflict-item", "LIB SIDE");
+        let conflict_disk = loc.path().join("conflict-item");
+        fs::create_dir_all(&conflict_disk).unwrap();
+        fs::write(conflict_disk.join("SKILL.md"), "DISK SIDE").unwrap();
+        db::upsert_placement(
+            &conn,
+            conflict_id,
+            loc_id,
+            "conflict-item",
+            "stale-baseline",
+            "drifted",
+        )
+        .unwrap();
+
+        // 4) Already in sync → skipped_ok.
+        let (ok_id, ok_hash) = mk_item("ok-item", "SAME");
+        importer::copy_tree(&lib.path().join("ok-item"), &loc.path().join("ok-item")).unwrap();
+        db::upsert_placement(&conn, ok_id, loc_id, "ok-item", &ok_hash, "in_sync").unwrap();
+
+        let (pushed, skipped_conflicts, skipped_ok) =
+            push_all_placements(&conn, lib.path(), loc_id).unwrap();
+        assert_eq!((pushed, skipped_conflicts, skipped_ok), (2, 1, 1));
+
+        // Pushed targets now match the library content…
+        assert_eq!(
+            fs::read_to_string(loc.path().join("missing-item/SKILL.md")).unwrap(),
+            "LIB MISSING"
+        );
+        assert_eq!(
+            fs::read_to_string(loc.path().join("stale-item/SKILL.md")).unwrap(),
+            "LIB NEW"
+        );
+        // …but the conflicted copy was NOT overwritten.
+        assert_eq!(
+            fs::read_to_string(conflict_disk.join("SKILL.md")).unwrap(),
+            "DISK SIDE"
+        );
+        // The batch landed in the activity log with the summary counts.
+        assert!(db::recent_activity(&conn, 5)
+            .unwrap()
+            .iter()
+            .any(|(_, kind, summary, _)| kind == "deploy"
+                && summary == "Pushed 2 item(s) to Test loc (1 conflicts skipped)"));
     }
 
     #[test]

@@ -221,6 +221,7 @@ body { overflow: hidden; }
 }
 .item:hover { background: rgba(127, 127, 127, 0.06); cursor: pointer; }
 .item.active { background: rgba(57, 108, 216, 0.14); }
+.item.cursor { outline: 1px solid var(--accent, #7aa2ff); outline-offset: -1px; }
 
 /* ---- detail / preview pane ---- */
 .detail {
