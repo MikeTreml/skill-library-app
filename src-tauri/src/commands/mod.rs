@@ -112,10 +112,17 @@ pub mod deploy;
 pub mod importing;
 pub mod items;
 
+// Flat re-exports: keep `commands::foo` working for cross-module helpers and the
+// shared tests module. Some are only consumed under #[cfg(test)], hence the allow.
+#[allow(unused_imports)]
 pub use ai_cmds::*;
+#[allow(unused_imports)]
 pub use catalog::*;
+#[allow(unused_imports)]
 pub use deploy::*;
+#[allow(unused_imports)]
 pub use importing::*;
+#[allow(unused_imports)]
 pub use items::*;
 
 #[cfg(test)]
