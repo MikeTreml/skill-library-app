@@ -213,7 +213,7 @@ function renderFilters() {
     else untriaged++;
   }
   const objBtn = (key: string | null, label: string, n: number) =>
-    `<button class="nav sub${objectFilter === key && view === "library" ? " active" : ""}" data-object="${key ?? ""}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
+    `<button class="nav sub${objectFilter === key && view === "library" ? " active" : ""}" data-object="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
   let tree: string;
   if (objects.size || untriaged) {
     tree =
@@ -228,7 +228,7 @@ function renderFilters() {
   }
 
   const tagBtn = (key: string | null, label: string, n: number) =>
-    `<button class="nav sub${tagFilter === key ? " active" : ""}" data-tag="${key ?? ""}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
+    `<button class="nav sub${tagFilter === key ? " active" : ""}" data-tag="${esc(key ?? "")}"><span>${esc(label)}</span><span class="count">${n}</span></button>`;
   const tagBlock = allTags.length
     ? `<details class="nav-tree" open><summary class="nav-head">Tags</summary>` +
       tagBtn(null, "All (clear tag)", allItems.length) +
@@ -1350,6 +1350,9 @@ function paletteActions(): PaletteAction[] {
     { label: "Go to Archived", hint: `${archivedItems.length}`, run: () => goToView("archived") },
     { label: "Go to Deleted", hint: `${deletedItems.length}`, run: () => goToView("deleted") },
     { label: "Scan & import", run: () => importBtn.click() },
+    { label: "Open Settings", run: () => openSettings() },
+    { label: "Export selected items", hint: `${selection.size} selected`, run: () => exportSelected() },
+    { label: "Batch refactor selected", hint: `${selection.size} selected`, run: () => startBatchRefine() },
   ];
   if (aiOk) acts.push({ label: "Classify all unclassified items", run: () => classifyBtn.click() });
   if (selection.size >= 2) {

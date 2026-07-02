@@ -6,33 +6,91 @@ const VERBS: &[(&str, &[&str])] = &[
     (
         "Create",
         &[
-            "new", "insert", "add", "build", "generate", "scaffold", "make", "author", "draft",
-            "develop", "implement", "init",
+            "new",
+            "insert",
+            "add",
+            "build",
+            "generate",
+            "scaffold",
+            "make",
+            "author",
+            "draft",
+            "develop",
+            "implement",
+            "init",
         ],
     ),
-    ("Analyze", &["inspect", "assess", "evaluate", "examine", "profile", "measure"]),
+    (
+        "Analyze",
+        &[
+            "inspect", "assess", "evaluate", "examine", "profile", "measure",
+        ],
+    ),
     ("Review", &["audit", "critique"]),
-    ("Explain", &["document", "summarize", "describe", "guide", "teach"]),
+    (
+        "Explain",
+        &["document", "summarize", "describe", "guide", "teach"],
+    ),
     ("Refactor", &["cleanup", "simplify", "reorganize", "rename"]),
     (
         "Convert",
-        &["migrate", "translate", "transform", "format", "import", "export", "port"],
+        &[
+            "migrate",
+            "translate",
+            "transform",
+            "format",
+            "import",
+            "export",
+            "port",
+        ],
     ),
     ("Optimize", &["tune", "improve"]),
     ("Test", &["validate", "verify", "lint", "assert"]),
-    ("Fix", &["debug", "repair", "resolve", "troubleshoot", "patch"]),
+    (
+        "Fix",
+        &["debug", "repair", "resolve", "troubleshoot", "patch"],
+    ),
     (
         "Search",
-        &["find", "extract", "query", "lookup", "classify", "detect", "scrape"],
+        &[
+            "find", "extract", "query", "lookup", "classify", "detect", "scrape",
+        ],
     ),
-    ("Configure", &["setup", "install", "integrate", "provision", "enable"]),
-    ("Manage", &["deploy", "monitor", "run", "sync", "schedule", "orchestrate"]),
-    ("Design", &["plan", "architect", "model", "compare", "recommend", "spec"]),
+    (
+        "Configure",
+        &["setup", "install", "integrate", "provision", "enable"],
+    ),
+    (
+        "Manage",
+        &[
+            "deploy",
+            "monitor",
+            "run",
+            "sync",
+            "schedule",
+            "orchestrate",
+        ],
+    ),
+    (
+        "Design",
+        &["plan", "architect", "model", "compare", "recommend", "spec"],
+    ),
 ];
 
 pub const CANONICAL_VERBS: &[&str] = &[
-    "Create", "Analyze", "Review", "Explain", "Refactor", "Convert", "Optimize", "Test", "Fix",
-    "Search", "Configure", "Manage", "Design",
+    "Create",
+    "Analyze",
+    "Review",
+    "Explain",
+    "Refactor",
+    "Convert",
+    "Optimize",
+    "Test",
+    "Fix",
+    "Search",
+    "Configure",
+    "Manage",
+    "Design",
 ];
 
 /// Normalize a verb to its canonical form (a canonical word maps to itself).

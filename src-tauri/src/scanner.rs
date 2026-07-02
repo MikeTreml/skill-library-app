@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 fn is_md(p: &Path) -> bool {
-    p.extension().map_or(false, |e| e.eq_ignore_ascii_case("md"))
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
 /// Common repo markdown files that are not items.
 fn is_noise(p: &Path) -> bool {
     matches!(
-        p.file_name().and_then(|s| s.to_str()).map(str::to_ascii_uppercase).as_deref(),
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_uppercase)
+            .as_deref(),
         Some("README.MD") | Some("LICENSE.MD") | Some("CHANGELOG.MD") | Some("CONTRIBUTING.MD")
     )
 }
@@ -101,7 +104,7 @@ pub fn scan_location(root: &Path, kind: LocationKind) -> std::io::Result<Vec<Sca
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |e| e == "md") {
+            if path.is_file() && path.extension().is_some_and(|e| e == "md") {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let meta = parse_meta(&content);
                 let fallback = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -207,7 +210,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let skill = d.path().join("real-folder");
         fs::create_dir_all(&skill).unwrap();
-        fs::write(skill.join("SKILL.md"), "---\nname: Fancy Name\ndescription: x\n---\n").unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Fancy Name\ndescription: x\n---\n",
+        )
+        .unwrap();
         let found = scan_location(d.path(), LocationKind::ClaudeSkills).unwrap();
         assert_eq!(found[0].name, "real-folder");
         assert_eq!(found[0].description, "x");
@@ -220,7 +227,11 @@ mod tests {
         let folder = d.path().join("real-folder");
         fs::create_dir_all(&folder).unwrap();
         fs::write(folder.join("SKILL.md"), "---\nname: Fancy Name\n---\nbody").unwrap();
-        fs::write(folder.join("notes.md"), "# inside claimed folder, not a skill").unwrap();
+        fs::write(
+            folder.join("notes.md"),
+            "# inside claimed folder, not a skill",
+        )
+        .unwrap();
         // standalone single-file skill, titled by its heading
         fs::write(d.path().join("loose.md"), "# Loose Skill\n\nbody").unwrap();
         // noise file, excluded
@@ -228,7 +239,10 @@ mod tests {
 
         let found = scan_custom(d.path(), ItemType::Skill).unwrap();
         let names: Vec<_> = found.iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["Loose Skill".to_string(), "real-folder".to_string()]);
+        assert_eq!(
+            names,
+            vec!["Loose Skill".to_string(), "real-folder".to_string()]
+        );
         let folder_skill = found.iter().find(|s| s.name == "real-folder").unwrap();
         assert_eq!(folder_skill.source_path, folder);
         assert_eq!(found.len(), 2);
@@ -246,7 +260,11 @@ mod tests {
         let names: Vec<_> = found.iter().map(|s| s.name.clone()).collect();
         assert_eq!(
             names,
-            vec!["Alpha Agent".to_string(), "Beta Agent".to_string(), "c".to_string()]
+            vec![
+                "Alpha Agent".to_string(),
+                "Beta Agent".to_string(),
+                "c".to_string()
+            ]
         );
         assert!(found.iter().all(|s| s.item_type == ItemType::Agent));
     }

@@ -38,13 +38,21 @@ pub fn group_duplicates(items: &[Item]) -> Vec<DupGroup> {
             } else {
                 format!("{object} › {sub} — {verb}")
             };
-            groups.push(DupGroup { key, kind: "exact", item_ids: ids.clone() });
+            groups.push(DupGroup {
+                key,
+                kind: "exact",
+                item_ids: ids.clone(),
+            });
         }
     }
     for (object, ids) in &by_object {
         // Near: the same object covered by more than one distinct verb (overlapping surface).
         if ids.len() > 1 && verbs_by_object.get(object).map_or(0, BTreeSet::len) > 1 {
-            groups.push(DupGroup { key: object.clone(), kind: "near", item_ids: ids.clone() });
+            groups.push(DupGroup {
+                key: object.clone(),
+                kind: "near",
+                item_ids: ids.clone(),
+            });
         }
     }
     groups
@@ -65,7 +73,11 @@ mod tests {
             category: None,
             subcategory: None,
             object: Some(object.into()),
-            sub_object: if sub.is_empty() { None } else { Some(sub.into()) },
+            sub_object: if sub.is_empty() {
+                None
+            } else {
+                Some(sub.into())
+            },
             verb: Some(verb.into()),
             qualifier: None,
             canonical_hash: "h".into(),
@@ -79,7 +91,10 @@ mod tests {
 
     #[test]
     fn same_object_sub_verb_is_exact() {
-        let g = group_duplicates(&[item(1, "Ax", "Form", "Create"), item(2, "Ax", "Form", "Create")]);
+        let g = group_duplicates(&[
+            item(1, "Ax", "Form", "Create"),
+            item(2, "Ax", "Form", "Create"),
+        ]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].kind, "exact");
         assert_eq!(g[0].item_ids, vec![1, 2]);
@@ -87,7 +102,10 @@ mod tests {
 
     #[test]
     fn same_object_different_verb_is_near() {
-        let g = group_duplicates(&[item(1, "Ax", "Form", "Create"), item(2, "Ax", "Form", "Review")]);
+        let g = group_duplicates(&[
+            item(1, "Ax", "Form", "Create"),
+            item(2, "Ax", "Form", "Review"),
+        ]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].kind, "near");
         assert_eq!(g[0].item_ids, vec![1, 2]);
@@ -95,7 +113,10 @@ mod tests {
 
     #[test]
     fn different_objects_no_group() {
-        let g = group_duplicates(&[item(1, "Ax", "Form", "Create"), item(2, "Twilio", "", "Configure")]);
+        let g = group_duplicates(&[
+            item(1, "Ax", "Form", "Create"),
+            item(2, "Twilio", "", "Configure"),
+        ]);
         assert!(g.is_empty());
     }
 

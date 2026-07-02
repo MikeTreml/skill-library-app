@@ -14,7 +14,7 @@ pub fn hash_path(path: &Path) -> std::io::Result<String> {
         entries.push((name, std::fs::read(path)?));
     } else {
         for entry in WalkDir::new(path) {
-            let entry = entry.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let entry = entry.map_err(std::io::Error::other)?;
             if entry.file_type().is_file() {
                 let rel = entry
                     .path()

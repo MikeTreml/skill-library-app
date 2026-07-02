@@ -93,10 +93,16 @@ mod tests {
             title_from("---\nname: From FM\n---\n# Heading\n", "file"),
             "From FM"
         );
-        assert_eq!(title_from("# Heading Title\n\nbody", "file"), "Heading Title");
+        assert_eq!(
+            title_from("# Heading Title\n\nbody", "file"),
+            "Heading Title"
+        );
         assert_eq!(title_from("just body, no name", "file"), "file");
         // heading inside front matter is ignored
-        assert_eq!(title_from("---\ndescription: x\n---\n# Real\n", "file"), "Real");
+        assert_eq!(
+            title_from("---\ndescription: x\n---\n# Real\n", "file"),
+            "Real"
+        );
     }
 
     #[test]

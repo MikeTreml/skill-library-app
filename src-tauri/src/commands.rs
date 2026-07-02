@@ -120,7 +120,7 @@ pub fn list_locations(state: State<AppState>) -> Result<Vec<Location>, String> {
 /// so it stays correct even when the target is temporarily missing.
 fn library_file(library_path: &str) -> PathBuf {
     let p = Path::new(library_path);
-    if p.extension().map_or(false, |e| e.eq_ignore_ascii_case("md")) {
+    if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
         p.to_path_buf()
     } else {
         p.join("SKILL.md")
@@ -152,14 +152,23 @@ pub async fn refine_item(
     tools_add: Vec<String>,
     tools_remove: Vec<String>,
 ) -> Result<RefineResult, String> {
-    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
+    let api_key = resolve_api_key(&state)
+        .ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     let path = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::item_library_path(&conn, id).map_err(|e| e.to_string())?
     };
     let original = read_library_content(&path).map_err(|e| e.to_string())?;
     let client = reqwest::Client::new();
-    let proposed = ai::refine(&client, &api_key, &original, &directives, &tools_add, &tools_remove).await?;
+    let proposed = ai::refine(
+        &client,
+        &api_key,
+        &original,
+        &directives,
+        &tools_add,
+        &tools_remove,
+    )
+    .await?;
     Ok(RefineResult { original, proposed })
 }
 
@@ -194,7 +203,8 @@ pub struct MergeResult {
 
 #[tauri::command]
 pub async fn merge_items(state: State<'_, AppState>, ids: Vec<i64>) -> Result<MergeResult, String> {
-    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
+    let api_key = resolve_api_key(&state)
+        .ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     let metas: Vec<(i64, String, String)> = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let items = db::list_items(&conn).map_err(|e| e.to_string())?;
@@ -215,7 +225,10 @@ pub async fn merge_items(state: State<'_, AppState>, ids: Vec<i64>) -> Result<Me
     for (id, name, path) in &metas {
         let content = read_library_content(path).map_err(|e| e.to_string())?;
         pairs.push((name.clone(), content));
-        sources.push(MergeSource { id: *id, name: name.clone() });
+        sources.push(MergeSource {
+            id: *id,
+            name: name.clone(),
+        });
     }
     let proposed = ai::merge(&reqwest::Client::new(), &api_key, &pairs).await?;
     Ok(MergeResult { proposed, sources })
@@ -246,7 +259,10 @@ fn create_item_from_content(
         .join(item_type.as_str())
         .join(&slug);
     let (file, library_path) = if item_type == ItemType::Agent {
-        (base.join(format!("{slug}.md")), base.join(format!("{slug}.md")))
+        (
+            base.join(format!("{slug}.md")),
+            base.join(format!("{slug}.md")),
+        )
     } else {
         (base.join("SKILL.md"), base.clone())
     };
@@ -342,7 +358,8 @@ pub fn save_merge(
     mode: String,
 ) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let type_str = db::item_type(&conn, *ids.first().ok_or("no sources")?).map_err(|e| e.to_string())?;
+    let type_str =
+        db::item_type(&conn, *ids.first().ok_or("no sources")?).map_err(|e| e.to_string())?;
     let item_type = ItemType::parse(&type_str).unwrap_or(ItemType::Skill);
     let id = create_item_from_content(&conn, &state.library_root, item_type, &name, &content)?;
     // Never touch the freshly-created merged item, even if it somehow shares an id.
@@ -363,7 +380,12 @@ pub fn save_merge(
     let _ = db::log_activity(
         &conn,
         "merge",
-        &format!("Merged {} source(s) into \"{}\" ({})", ids.len(), name, mode),
+        &format!(
+            "Merged {} source(s) into \"{}\" ({})",
+            ids.len(),
+            name,
+            mode
+        ),
     );
     Ok(id)
 }
@@ -452,11 +474,17 @@ fn copy_over(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// Back up whatever is at `target` into the library's `_sync_backups` (one slot per placement).
-fn backup_before_overwrite(library_root: &Path, placement_id: i64, target: &Path) -> Result<(), String> {
+fn backup_before_overwrite(
+    library_root: &Path,
+    placement_id: i64,
+    target: &Path,
+) -> Result<(), String> {
     if !target.exists() {
         return Ok(());
     }
-    let dir = library_root.join("_sync_backups").join(placement_id.to_string());
+    let dir = library_root
+        .join("_sync_backups")
+        .join(placement_id.to_string());
     if dir.exists() {
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -469,7 +497,10 @@ fn backup_before_overwrite(library_root: &Path, placement_id: i64, target: &Path
 }
 
 #[tauri::command]
-pub fn item_sync(state: State<AppState>, id: i64) -> Result<Vec<crate::model::PlacementInfo>, String> {
+pub fn item_sync(
+    state: State<AppState>,
+    id: i64,
+) -> Result<Vec<crate::model::PlacementInfo>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let canonical = db::item_canonical_hash(&conn, id).map_err(|e| e.to_string())?;
     let places = db::placements_for_item(&conn, id).map_err(|e| e.to_string())?;
@@ -492,7 +523,9 @@ pub fn item_sync(state: State<AppState>, id: i64) -> Result<Vec<crate::model::Pl
 /// its item's current canonical hash — same status derivation `item_sync` uses,
 /// just aggregated instead of per-item).
 #[tauri::command]
-pub fn deploy_status(state: State<AppState>) -> Result<Vec<crate::model::LocationDeployStatus>, String> {
+pub fn deploy_status(
+    state: State<AppState>,
+) -> Result<Vec<crate::model::LocationDeployStatus>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let rows = db::all_placements_with_hash(&conn).map_err(|e| e.to_string())?;
 
@@ -513,17 +546,19 @@ pub fn deploy_status(state: State<AppState>) -> Result<Vec<crate::model::Locatio
 
     Ok(by_location
         .into_iter()
-        .map(|(location_id, (label, root_path, in_sync, drifted, missing))| {
-            crate::model::LocationDeployStatus {
-                location_id,
-                label,
-                root_path,
-                in_sync,
-                drifted,
-                missing,
-                total: in_sync + drifted + missing,
-            }
-        })
+        .map(
+            |(location_id, (label, root_path, in_sync, drifted, missing))| {
+                crate::model::LocationDeployStatus {
+                    location_id,
+                    label,
+                    root_path,
+                    in_sync,
+                    drifted,
+                    missing,
+                    total: in_sync + drifted + missing,
+                }
+            },
+        )
         .collect())
 }
 
@@ -580,7 +615,8 @@ pub fn read_placement(state: State<AppState>, placement_id: i64) -> Result<Strin
 #[tauri::command]
 pub fn push_to_location(state: State<AppState>, placement_id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let (item_id, root, rel) = db::placement_paths(&conn, placement_id).map_err(|e| e.to_string())?;
+    let (item_id, root, rel) =
+        db::placement_paths(&conn, placement_id).map_err(|e| e.to_string())?;
     let lib_path = db::item_library_path(&conn, item_id).map_err(|e| e.to_string())?;
     let abs = placement_abs(&root, &rel);
     backup_before_overwrite(&state.library_root, placement_id, &abs)?;
@@ -593,7 +629,8 @@ pub fn push_to_location(state: State<AppState>, placement_id: i64) -> Result<(),
 #[tauri::command]
 pub fn pull_from_location(state: State<AppState>, placement_id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let (item_id, root, rel) = db::placement_paths(&conn, placement_id).map_err(|e| e.to_string())?;
+    let (item_id, root, rel) =
+        db::placement_paths(&conn, placement_id).map_err(|e| e.to_string())?;
     let abs = placement_abs(&root, &rel);
     if !abs.exists() {
         return Err("location copy is missing".into());
@@ -614,8 +651,8 @@ fn scan_and_import_location(
     kind: LocationKind,
     summary: &mut crate::model::ImportSummary,
 ) -> Result<(), String> {
-    let loc_id =
-        db::upsert_location(conn, label, &path.to_string_lossy(), kind).map_err(|e| e.to_string())?;
+    let loc_id = db::upsert_location(conn, label, &path.to_string_lossy(), kind)
+        .map_err(|e| e.to_string())?;
     let scanned = crate::scanner::scan_location(path, kind).map_err(|e| e.to_string())?;
     summary.locations_scanned += 1;
     for item in &scanned {
@@ -664,7 +701,9 @@ pub fn import_all(
         }
         let label = format!(
             "{} ({})",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or("custom"),
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("custom"),
             sd.item_type.as_str()
         );
         // Location kind is just for bookkeeping; scan_custom drives detection.
@@ -675,7 +714,8 @@ pub fn import_all(
         };
         let loc_id =
             db::upsert_location(conn, &label, &sd.path, kind).map_err(|e| e.to_string())?;
-        let scanned = crate::scanner::scan_custom(&path, sd.item_type).map_err(|e| e.to_string())?;
+        let scanned =
+            crate::scanner::scan_custom(&path, sd.item_type).map_err(|e| e.to_string())?;
         summary.locations_scanned += 1;
         for item in &scanned {
             importer::import_scanned(conn, library_root, loc_id, &path, item, &mut summary)
@@ -700,8 +740,10 @@ pub fn import_all(
                 tarball,
                 &staging,
                 &mut summary,
-                report,
-                is_cancelled,
+                &importer::ImportHooks {
+                    report,
+                    is_cancelled,
+                },
             )
             .map_err(|e| e.to_string())?;
         }
@@ -847,6 +889,11 @@ pub fn api_key_status(state: State<AppState>) -> Result<(bool, bool), String> {
     Ok((stored, ai::api_key().is_some()))
 }
 
+/// Rows queued for classification: (item_id, name, description).
+type ClassifyTodo = Vec<(i64, String, String)>;
+/// Lowercased verb → canonical verb, from the editable verb map.
+type VerbMap = std::collections::HashMap<String, String>;
+
 /// Classify items. `ids = None` → all unclassified; `Some(list)` → exactly those.
 /// Emits a `classify-progress` event after each batch.
 #[tauri::command]
@@ -856,9 +903,10 @@ pub async fn classify_all(
     ids: Option<Vec<i64>>,
 ) -> Result<ClassifySummary, String> {
     use tauri::Emitter;
-    let api_key = resolve_api_key(&state).ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
+    let api_key = resolve_api_key(&state)
+        .ok_or("No API key set (add one in Settings or set OPENAI_API_KEY)")?;
     // Scope the guard to this block so it is dropped before the await loop (not Send).
-    let (todo, verb_map): (Vec<(i64, String, String)>, std::collections::HashMap<String, String>) = {
+    let (todo, verb_map): (ClassifyTodo, VerbMap) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let todo = match &ids {
             Some(list) => {
@@ -903,7 +951,13 @@ pub async fn classify_all(
                 classified += 1;
             }
         }
-        let _ = app.emit("classify-progress", ClassifyProgress { done: classified, total });
+        let _ = app.emit(
+            "classify-progress",
+            ClassifyProgress {
+                done: classified,
+                total,
+            },
+        );
     }
     Ok(ClassifySummary { classified, total })
 }
@@ -915,7 +969,11 @@ pub fn list_scan_dirs(state: State<AppState>) -> Result<Vec<ScanDir>, String> {
 }
 
 #[tauri::command]
-pub fn add_scan_dir(state: State<AppState>, path: String, item_type: ItemType) -> Result<(), String> {
+pub fn add_scan_dir(
+    state: State<AppState>,
+    path: String,
+    item_type: ItemType,
+) -> Result<(), String> {
     if !Path::new(&path).is_dir() {
         return Err(format!("Not a directory: {path}"));
     }
@@ -1018,7 +1076,9 @@ pub fn canonical_verbs() -> Vec<&'static str> {
 
 /// Recent activity-log entries for the Dashboard feed: (id, kind, summary, created_at).
 #[tauri::command]
-pub fn recent_activity(state: State<AppState>) -> Result<Vec<(i64, String, String, String)>, String> {
+pub fn recent_activity(
+    state: State<AppState>,
+) -> Result<Vec<(i64, String, String, String)>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::recent_activity(&conn, 30).map_err(|e| e.to_string())
 }
@@ -1028,7 +1088,11 @@ pub fn recent_activity(state: State<AppState>) -> Result<Vec<(i64, String, Strin
 /// that another machine can drop into a scan dir and re-import). Read-only on the
 /// library; never mutates source or library files. Returns the number of items written.
 #[tauri::command]
-pub fn export_items(state: State<AppState>, ids: Vec<i64>, dest_path: String) -> Result<usize, String> {
+pub fn export_items(
+    state: State<AppState>,
+    ids: Vec<i64>,
+    dest_path: String,
+) -> Result<usize, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     if ids.is_empty() {
         return Err("No items selected to export.".into());
@@ -1038,7 +1102,11 @@ pub fn export_items(state: State<AppState>, ids: Vec<i64>, dest_path: String) ->
         paths.push(db::item_library_path(&conn, *id).map_err(|e| e.to_string())?);
     }
     let written = write_export_archive(&paths, Path::new(&dest_path))?;
-    let _ = db::log_activity(&conn, "export", &format!("Exported {written} item(s) to {dest_path}"));
+    let _ = db::log_activity(
+        &conn,
+        "export",
+        &format!("Exported {written} item(s) to {dest_path}"),
+    );
     Ok(written)
 }
 
@@ -1112,7 +1180,11 @@ pub fn list_verb_map(state: State<AppState>) -> Result<Vec<(String, String)>, St
 }
 
 #[tauri::command]
-pub fn add_synonym(state: State<AppState>, canonical: String, synonym: String) -> Result<(), String> {
+pub fn add_synonym(
+    state: State<AppState>,
+    canonical: String,
+    synonym: String,
+) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::add_synonym(&conn, &canonical, &synonym).map_err(|e| e.to_string())
 }
@@ -1168,7 +1240,10 @@ mod tests {
 
         let dest = d.path().join("out.tar.gz");
         let n = write_export_archive(
-            &[skill.to_string_lossy().to_string(), missing.to_string_lossy().to_string()],
+            &[
+                skill.to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string(),
+            ],
             &dest,
         )
         .unwrap();
@@ -1178,8 +1253,13 @@ mod tests {
         let unpack = d.path().join("unpacked");
         fs::create_dir_all(&unpack).unwrap();
         let f = fs::File::open(&dest).unwrap();
-        tar::Archive::new(GzDecoder::new(f)).unpack(&unpack).unwrap();
-        assert_eq!(fs::read_to_string(unpack.join("my-skill/SKILL.md")).unwrap(), "BODY");
+        tar::Archive::new(GzDecoder::new(f))
+            .unpack(&unpack)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(unpack.join("my-skill/SKILL.md")).unwrap(),
+            "BODY"
+        );
     }
 
     #[test]
@@ -1194,7 +1274,10 @@ mod tests {
         );
         let f = d.path().join("agent.md");
         fs::write(&f, "FILE BODY").unwrap();
-        assert_eq!(read_library_content(f.to_str().unwrap()).unwrap(), "FILE BODY");
+        assert_eq!(
+            read_library_content(f.to_str().unwrap()).unwrap(),
+            "FILE BODY"
+        );
     }
 
     #[test]
@@ -1245,7 +1328,10 @@ mod tests {
             .into_iter()
             .map(|i| i.name)
             .collect();
-        assert!(names.contains(&"my-skill-folder".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"my-skill-folder".to_string()),
+            "got {names:?}"
+        );
         assert!(names.contains(&"Loose One".to_string()), "got {names:?}");
         assert!(summary.items_new >= 2);
     }
@@ -1290,8 +1376,15 @@ mod tests {
 
         tombstone_item(&conn, lib.path(), id).unwrap();
         assert!(!folder.exists(), "library copy moved into _deleted_backups");
-        assert!(db::list_items(&conn).unwrap().is_empty(), "hidden from library");
-        assert_eq!(db::list_deleted(&conn).unwrap().len(), 1, "shown in Deleted");
+        assert!(
+            db::list_items(&conn).unwrap().is_empty(),
+            "hidden from library"
+        );
+        assert_eq!(
+            db::list_deleted(&conn).unwrap().len(),
+            1,
+            "shown in Deleted"
+        );
 
         restore_item(&conn, lib.path(), id).unwrap();
         assert!(folder.join("SKILL.md").exists(), "library copy restored");
@@ -1322,14 +1415,20 @@ mod tests {
         let new_id =
             create_item_from_content(&conn, lib.path(), ItemType::Skill, "Foo", "MERGED").unwrap();
 
-        assert_ne!(new_id, foo_id, "must be a brand-new item, not the source's id");
+        assert_ne!(
+            new_id, foo_id,
+            "must be a brand-new item, not the source's id"
+        );
         assert_eq!(
             fs::read_to_string(foo_dir.join("SKILL.md")).unwrap(),
             "ORIGINAL FOO",
             "the source's library copy must be untouched"
         );
         let merged_path = db::item_library_path(&conn, new_id).unwrap();
-        assert!(merged_path.contains("foo-2"), "fresh slug, got {merged_path}");
+        assert!(
+            merged_path.contains("foo-2"),
+            "fresh slug, got {merged_path}"
+        );
         assert_eq!(db::list_items(&conn).unwrap().len(), 2);
     }
 

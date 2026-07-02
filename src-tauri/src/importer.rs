@@ -34,7 +34,7 @@ pub fn import_scanned(
     };
     let lib_path_str = dest.to_string_lossy().to_string();
 
-    let to_db = |e: rusqlite::Error| std::io::Error::new(std::io::ErrorKind::Other, e);
+    let to_db = std::io::Error::other;
 
     // A user-deleted (tombstoned) item must not be resurrected from its still-present
     // source — skip it entirely (no copy, no placement, no variant flag).
@@ -117,6 +117,13 @@ fn library_dest(library_root: &Path, item_type: ItemType, slug: &str) -> PathBuf
         .join(slug)
 }
 
+/// Progress-reporting and cancellation callbacks threaded through a long-running
+/// import so callers can surface status and honor Cancel mid-run.
+pub struct ImportHooks<'a> {
+    pub report: &'a dyn Fn(String),
+    pub is_cancelled: &'a dyn Fn() -> bool,
+}
+
 /// Extract a `skills-deduped.tar.gz` of `**/SKILL.md` trees into a staging dir,
 /// then import each discovered skill against the given tarball location id.
 pub fn import_tarball(
@@ -126,13 +133,12 @@ pub fn import_tarball(
     tarball_path: &Path,
     staging_dir: &Path,
     summary: &mut ImportSummary,
-    report: &dyn Fn(String),
-    is_cancelled: &dyn Fn() -> bool,
+    hooks: &ImportHooks<'_>,
 ) -> std::io::Result<()> {
-    report("Extracting tarball…".to_string());
+    (hooks.report)("Extracting tarball…".to_string());
     std::fs::create_dir_all(staging_dir)?;
     // Don't even start the multi-second unpack if cancellation is already pending.
-    if is_cancelled() {
+    if (hooks.is_cancelled)() {
         std::fs::remove_dir_all(staging_dir).ok();
         summary.cancelled = true;
         return Ok(());
@@ -145,14 +151,21 @@ pub fn import_tarball(
         // Checked every iteration (an atomic load is free) so Cancel feels instant.
         // The i==0 check also covers cancellation during unpack/scan above.
         // Always lands BETWEEN whole-item writes — each import_scanned autocommits.
-        if is_cancelled() {
+        if (hooks.is_cancelled)() {
             std::fs::remove_dir_all(staging_dir).ok();
             summary.cancelled = true;
             return Ok(());
         }
-        import_scanned(conn, library_root, tarball_location_id, staging_dir, item, summary)?;
+        import_scanned(
+            conn,
+            library_root,
+            tarball_location_id,
+            staging_dir,
+            item,
+            summary,
+        )?;
         if i % 200 == 0 {
-            report(format!("Importing tarball… {i}/{total}"));
+            (hooks.report)(format!("Importing tarball… {i}/{total}"));
         }
     }
     // The extracted tarball can be several MB; remove it now that everything
@@ -264,8 +277,15 @@ mod tests {
         let mut s2 = ImportSummary::default();
         import_scanned(&conn, lib.path(), loc_id, src.path(), &item, &mut s2).unwrap();
         assert_eq!(s2.items_new, 0, "tombstoned item is not recreated");
-        assert!(db::list_items(&conn).unwrap().is_empty(), "still hidden from library");
-        assert_eq!(db::list_deleted(&conn).unwrap().len(), 1, "still tombstoned");
+        assert!(
+            db::list_items(&conn).unwrap().is_empty(),
+            "still hidden from library"
+        );
+        assert_eq!(
+            db::list_deleted(&conn).unwrap().len(),
+            1,
+            "still tombstoned"
+        );
     }
 
     #[test]
@@ -301,7 +321,19 @@ mod tests {
         .unwrap();
         let mut s = ImportSummary::default();
 
-        import_tarball(&conn, lib.path(), loc, &tgz, &staging, &mut s, &|_| {}, &|| false).unwrap();
+        import_tarball(
+            &conn,
+            lib.path(),
+            loc,
+            &tgz,
+            &staging,
+            &mut s,
+            &ImportHooks {
+                report: &|_| {},
+                is_cancelled: &|| false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(s.items_new, 1);
         assert!(lib
@@ -341,9 +373,13 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let lib = tempfile::tempdir().unwrap();
         let staging = tmp.path().join("staging");
-        let loc =
-            db::upsert_location(&conn, "tarball", tgz.to_str().unwrap(), LocationKind::Tarball)
-                .unwrap();
+        let loc = db::upsert_location(
+            &conn,
+            "tarball",
+            tgz.to_str().unwrap(),
+            LocationKind::Tarball,
+        )
+        .unwrap();
         let mut s = ImportSummary::default();
 
         // Checks: [0] pre-unpack (false), [1] loop i=0 (false → import item a),
@@ -356,14 +392,20 @@ mod tests {
             &tgz,
             &staging,
             &mut s,
-            &|_| {},
-            &|| calls.fetch_add(1, Ordering::SeqCst) >= 2,
+            &ImportHooks {
+                report: &|_| {},
+                is_cancelled: &|| calls.fetch_add(1, Ordering::SeqCst) >= 2,
+            },
         )
         .unwrap();
 
         assert_eq!(s.items_new, 1, "should stop after the first item");
         assert!(s.cancelled, "summary flags the early stop");
-        assert_eq!(db::list_items(&conn).unwrap().len(), 1, "partial catalog is valid");
+        assert_eq!(
+            db::list_items(&conn).unwrap().len(),
+            1,
+            "partial catalog is valid"
+        );
         assert!(!staging.exists(), "staging dir cleaned up on cancel");
     }
 }

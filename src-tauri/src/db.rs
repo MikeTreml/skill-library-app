@@ -275,9 +275,9 @@ pub fn placements_for_item(
 /// hash — feeds the Deploy mode "map view" (one status roll-up per location instead
 /// of drilling into each item individually).
 /// Returns (placement_id, location_id, location_label, root_path, rel_path, canonical_hash).
-pub fn all_placements_with_hash(
-    conn: &Connection,
-) -> rusqlite::Result<Vec<(i64, i64, String, String, String, String)>> {
+pub type PlacementWithHash = (i64, i64, String, String, String, String);
+
+pub fn all_placements_with_hash(conn: &Connection) -> rusqlite::Result<Vec<PlacementWithHash>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, l.id, l.label, l.root_path, p.rel_path, i.canonical_hash
          FROM placements p
@@ -287,7 +287,14 @@ pub fn all_placements_with_hash(
          ORDER BY l.label",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
     })?;
     rows.collect()
 }
@@ -296,9 +303,9 @@ pub fn all_placements_with_hash(
 /// `location_hash` (the baseline recorded at last sync — the "last common sync"
 /// ancestor used for 3-way conflict detection). Returns
 /// (placement_id, location_label, root_path, rel_path, canonical_hash, baseline_hash).
-pub fn placements_for_conflict_check(
-    conn: &Connection,
-) -> rusqlite::Result<Vec<(i64, String, String, String, String, String)>> {
+pub type ConflictCheckRow = (i64, String, String, String, String, String);
+
+pub fn placements_for_conflict_check(conn: &Connection) -> rusqlite::Result<Vec<ConflictCheckRow>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, l.label, l.root_path, p.rel_path, i.canonical_hash, p.location_hash
          FROM placements p
@@ -308,13 +315,23 @@ pub fn placements_for_conflict_check(
          ORDER BY l.label",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
     })?;
     rows.collect()
 }
 
 /// (item_id, root_path, rel_path) for one placement.
-pub fn placement_paths(conn: &Connection, placement_id: i64) -> rusqlite::Result<(i64, String, String)> {
+pub fn placement_paths(
+    conn: &Connection,
+    placement_id: i64,
+) -> rusqlite::Result<(i64, String, String)> {
     conn.query_row(
         "SELECT p.item_id, l.root_path, p.rel_path
          FROM placements p JOIN locations l ON p.location_id = l.id WHERE p.id = ?1",
@@ -371,7 +388,11 @@ pub fn list_deleted(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
 }
 
 pub fn item_type(conn: &Connection, id: i64) -> rusqlite::Result<String> {
-    conn.query_row("SELECT item_type FROM items WHERE id = ?1", params![id], |r| r.get(0))
+    conn.query_row(
+        "SELECT item_type FROM items WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
 }
 
 const ITEM_COLUMNS: &str = "id, item_type, name, slug, description, category, subcategory,
@@ -509,7 +530,9 @@ pub fn undismiss_cluster(conn: &Connection, cluster_key: &str) -> rusqlite::Resu
     Ok(())
 }
 
-pub fn list_dismissed_clusters(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+pub fn list_dismissed_clusters(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
     let mut stmt = conn.prepare("SELECT cluster_key FROM dismissed_clusters")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect()
@@ -571,16 +594,25 @@ pub fn distinct_verbs_with_counts(conn: &Connection) -> rusqlite::Result<Vec<(St
 }
 
 /// Append an entry to the activity log (audit trail powering the Dashboard feed).
+/// The log is capped at 500 rows: after each insert, anything older than the
+/// newest 500 entries is pruned so the table can't grow unbounded.
 pub fn log_activity(conn: &Connection, kind: &str, summary: &str) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO activity_log (kind, summary) VALUES (?1, ?2)",
         params![kind, summary],
     )?;
+    conn.execute(
+        "DELETE FROM activity_log WHERE id NOT IN (SELECT id FROM activity_log ORDER BY id DESC LIMIT 500)",
+        [],
+    )?;
     Ok(())
 }
 
 /// Most-recent activity entries first: (id, kind, summary, created_at).
-pub fn recent_activity(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
+pub fn recent_activity(
+    conn: &Connection,
+    limit: i64,
+) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, summary, created_at FROM activity_log ORDER BY id DESC LIMIT ?1",
     )?;
@@ -592,8 +624,12 @@ pub fn recent_activity(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<(i
 
 /// Read a setting value by key (None if unset).
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 /// Upsert a setting value.
@@ -693,7 +729,8 @@ pub fn add_scan_dir(conn: &Connection, path: &str, item_type: ItemType) -> rusql
 }
 
 pub fn list_scan_dirs(conn: &Connection) -> rusqlite::Result<Vec<ScanDir>> {
-    let mut stmt = conn.prepare("SELECT id, path, item_type, enabled FROM scan_dirs ORDER BY id")?;
+    let mut stmt =
+        conn.prepare("SELECT id, path, item_type, enabled FROM scan_dirs ORDER BY id")?;
     let rows = stmt.query_map([], |r| {
         let t: String = r.get(2)?;
         Ok(ScanDir {
@@ -796,7 +833,15 @@ mod tests {
         let c = open_in_memory().unwrap();
         let (id, _) =
             insert_item_if_absent(&c, ItemType::Skill, "x", "x", "d", "h", "lib/x").unwrap();
-        set_classification(&c, id, Some("Ax"), Some("Form"), Some("Create"), Some("Expert")).unwrap();
+        set_classification(
+            &c,
+            id,
+            Some("Ax"),
+            Some("Form"),
+            Some("Create"),
+            Some("Expert"),
+        )
+        .unwrap();
         let items = list_items(&c).unwrap();
         let it = &items[0];
         assert_eq!(it.object.as_deref(), Some("Ax"));
@@ -839,7 +884,9 @@ mod tests {
     fn verb_map_is_seeded_and_editable() {
         let c = open_in_memory().unwrap();
         let map = list_verb_map(&c).unwrap();
-        assert!(map.iter().any(|(canon, syn)| canon == "Create" && syn == "generate"));
+        assert!(map
+            .iter()
+            .any(|(canon, syn)| canon == "Create" && syn == "generate"));
         add_synonym(&c, "Create", "Spawn").unwrap();
         assert!(list_verb_map(&c).unwrap().iter().any(|(_, s)| s == "spawn"));
         remove_synonym(&c, "spawn").unwrap();
@@ -851,13 +898,26 @@ mod tests {
         let c = open_in_memory().unwrap();
         let (item_id, _) =
             insert_item_if_absent(&c, ItemType::Skill, "x", "x", "d", "h", "lib/x").unwrap();
-        let loc = upsert_location(&c, "Claude skills", "/home/.claude/skills", LocationKind::ClaudeSkills).unwrap();
+        let loc = upsert_location(
+            &c,
+            "Claude skills",
+            "/home/.claude/skills",
+            LocationKind::ClaudeSkills,
+        )
+        .unwrap();
         upsert_placement(&c, item_id, loc, "x", "h", "in_sync").unwrap();
 
         let places = placements_for_item(&c, item_id).unwrap();
         assert_eq!(places.len(), 1);
         let (pid, label, root, rel) = places[0].clone();
-        assert_eq!((label, root, rel), ("Claude skills".into(), "/home/.claude/skills".into(), "x".into()));
+        assert_eq!(
+            (label, root, rel),
+            (
+                "Claude skills".into(),
+                "/home/.claude/skills".into(),
+                "x".into()
+            )
+        );
 
         let (it, root2, rel2) = placement_paths(&c, pid).unwrap();
         assert_eq!(it, item_id);
@@ -865,7 +925,9 @@ mod tests {
 
         update_placement_sync(&c, pid, "newhash", "drifted").unwrap();
         let status: String = c
-            .query_row("SELECT status FROM placements WHERE id=?1", [pid], |r| r.get(0))
+            .query_row("SELECT status FROM placements WHERE id=?1", [pid], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(status, "drifted");
     }
@@ -890,8 +952,20 @@ mod tests {
             insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "hash1", "lib/a").unwrap();
         let (item2, _) =
             insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "hash2", "lib/b").unwrap();
-        let loc1 = upsert_location(&c, "Claude skills", "/home/.claude/skills", LocationKind::ClaudeSkills).unwrap();
-        let loc2 = upsert_location(&c, "Codex skills", "/home/.codex/skills", LocationKind::Codex).unwrap();
+        let loc1 = upsert_location(
+            &c,
+            "Claude skills",
+            "/home/.claude/skills",
+            LocationKind::ClaudeSkills,
+        )
+        .unwrap();
+        let loc2 = upsert_location(
+            &c,
+            "Codex skills",
+            "/home/.codex/skills",
+            LocationKind::Codex,
+        )
+        .unwrap();
         upsert_placement(&c, item1, loc1, "a", "hash1", "in_sync").unwrap();
         upsert_placement(&c, item2, loc1, "b", "hash2", "in_sync").unwrap();
         upsert_placement(&c, item2, loc2, "b", "hash2", "in_sync").unwrap();
@@ -899,8 +973,15 @@ mod tests {
         let rows = all_placements_with_hash(&c).unwrap();
         assert_eq!(rows.len(), 3);
         // Every row carries its item's *current* canonical hash (for fresh status derivation).
-        assert!(rows.iter().any(|(_, lid, _, _, _, hash)| *lid == loc1 && hash == "hash1"));
-        assert!(rows.iter().filter(|(_, lid, _, _, _, _)| *lid == loc2).count() == 1);
+        assert!(rows
+            .iter()
+            .any(|(_, lid, _, _, _, hash)| *lid == loc1 && hash == "hash1"));
+        assert!(
+            rows.iter()
+                .filter(|(_, lid, _, _, _, _)| *lid == loc2)
+                .count()
+                == 1
+        );
 
         // Soft-deleting an item's placements should drop out of the roll-up.
         conn_mark_deleted(&c, item1);
@@ -912,8 +993,11 @@ mod tests {
     /// the DB layer) so `all_placements_with_hash`'s `WHERE i.deleted = 0` filter can be
     /// exercised without pulling in the full commands-layer delete flow.
     fn conn_mark_deleted(conn: &Connection, item_id: i64) {
-        conn.execute("UPDATE items SET deleted = 1 WHERE id = ?1", params![item_id])
-            .unwrap();
+        conn.execute(
+            "UPDATE items SET deleted = 1 WHERE id = ?1",
+            params![item_id],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -935,8 +1019,10 @@ mod tests {
     #[test]
     fn item_tags_crud_and_counts() {
         let c = open_in_memory().unwrap();
-        let (a, _) = insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
-        let (b, _) = insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
+        let (a, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
+        let (b, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
 
         add_item_tag(&c, a, "Core").unwrap(); // normalizes to lowercase
         add_item_tag(&c, a, "core").unwrap(); // idempotent after normalize
@@ -954,7 +1040,11 @@ mod tests {
 
         remove_item_tag(&c, a, "Core").unwrap(); // case-insensitive removal
         assert_eq!(
-            list_all_tags(&c).unwrap().iter().find(|(t, _)| t == "core").map(|(_, n)| *n),
+            list_all_tags(&c)
+                .unwrap()
+                .iter()
+                .find(|(t, _)| t == "core")
+                .map(|(_, n)| *n),
             Some(1)
         );
     }
@@ -974,13 +1064,32 @@ mod tests {
     }
 
     #[test]
+    fn activity_log_prunes_to_newest_500_rows() {
+        let c = open_in_memory().unwrap();
+        for i in 0..502 {
+            log_activity(&c, "import", &format!("entry {i}")).unwrap();
+        }
+
+        let all = recent_activity(&c, 1000).unwrap();
+        assert_eq!(all.len(), 500, "log is capped at 500 rows");
+        assert_eq!(all[0].2, "entry 501"); // newest entry survives
+        assert_eq!(all[499].2, "entry 2"); // the two oldest were pruned
+    }
+
+    #[test]
     fn settings_upsert_get_delete() {
         let c = open_in_memory().unwrap();
         assert_eq!(get_setting(&c, "openai_api_key").unwrap(), None);
         set_setting(&c, "openai_api_key", "sk-abc").unwrap();
-        assert_eq!(get_setting(&c, "openai_api_key").unwrap().as_deref(), Some("sk-abc"));
+        assert_eq!(
+            get_setting(&c, "openai_api_key").unwrap().as_deref(),
+            Some("sk-abc")
+        );
         set_setting(&c, "openai_api_key", "sk-xyz").unwrap(); // upsert overwrites
-        assert_eq!(get_setting(&c, "openai_api_key").unwrap().as_deref(), Some("sk-xyz"));
+        assert_eq!(
+            get_setting(&c, "openai_api_key").unwrap().as_deref(),
+            Some("sk-xyz")
+        );
         delete_setting(&c, "openai_api_key").unwrap();
         assert_eq!(get_setting(&c, "openai_api_key").unwrap(), None);
     }
@@ -988,15 +1097,21 @@ mod tests {
     #[test]
     fn usage_tracking_marks_and_lists_candidates() {
         let c = open_in_memory().unwrap();
-        let (a, _) = insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
-        let (b, _) = insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
+        let (a, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "a", "a", "d", "h", "lib/a").unwrap();
+        let (b, _) =
+            insert_item_if_absent(&c, ItemType::Skill, "b", "b", "d", "h", "lib/b").unwrap();
 
         // Both start unused → both are deletion candidates.
         assert_eq!(never_used_items(&c).unwrap().len(), 2);
 
         mark_item_used(&c, a).unwrap();
         mark_item_used(&c, a).unwrap(); // count accumulates
-        let used = list_items(&c).unwrap().into_iter().find(|i| i.id == a).unwrap();
+        let used = list_items(&c)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.id == a)
+            .unwrap();
         assert_eq!(used.use_count, 2);
         assert!(used.last_used_at.is_some());
 

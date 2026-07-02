@@ -68,7 +68,8 @@ struct RawResp {
 /// Parse the model's JSON content into classifications, normalizing the verb
 /// through the canonical taxonomy (unknown verbs are kept as-is).
 pub fn parse_response(content: &str) -> Result<Vec<(i64, Classification)>, String> {
-    let resp: RawResp = serde_json::from_str(content).map_err(|e| format!("classify parse: {e}"))?;
+    let resp: RawResp =
+        serde_json::from_str(content).map_err(|e| format!("classify parse: {e}"))?;
     Ok(resp
         .items
         .into_iter()
@@ -106,7 +107,10 @@ pub async fn classify_batch(
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("OpenAI {status}: {}", resp.text().await.unwrap_or_default()));
+        return Err(format!(
+            "OpenAI {status}: {}",
+            resp.text().await.unwrap_or_default()
+        ));
     }
     let v: Value = resp.json().await.map_err(|e| e.to_string())?;
     let content = v["choices"][0]["message"]["content"]
@@ -160,14 +164,22 @@ pub fn build_refine_request(
 pub fn strip_code_fences(s: &str) -> String {
     let t = s.trim();
     if let Some(rest) = t.strip_prefix("```") {
-        let after = rest.splitn(2, '\n').nth(1).unwrap_or("");
-        return after.strip_suffix("```").unwrap_or(after).trim_end().to_string();
+        let after = rest.split_once('\n').map(|x| x.1).unwrap_or("");
+        return after
+            .strip_suffix("```")
+            .unwrap_or(after)
+            .trim_end()
+            .to_string();
     }
     t.to_string()
 }
 
 /// POST a chat-completions body and return the message text (code fences stripped).
-async fn complete_text(client: &reqwest::Client, api_key: &str, body: Value) -> Result<String, String> {
+async fn complete_text(
+    client: &reqwest::Client,
+    api_key: &str,
+    body: Value,
+) -> Result<String, String> {
     let resp = client
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
@@ -177,7 +189,10 @@ async fn complete_text(client: &reqwest::Client, api_key: &str, body: Value) -> 
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("OpenAI {status}: {}", resp.text().await.unwrap_or_default()));
+        return Err(format!(
+            "OpenAI {status}: {}",
+            resp.text().await.unwrap_or_default()
+        ));
     }
     let v: Value = resp.json().await.map_err(|e| e.to_string())?;
     let out = v["choices"][0]["message"]["content"]
@@ -205,7 +220,8 @@ pub fn build_merge_request(items: &[(String, String)]) -> Value {
     for (i, (name, content)) in items.iter().enumerate() {
         user.push_str(&format!("\n=== SOURCE {} — {name} ===\n{content}\n", i + 1));
     }
-    let system = "You merge multiple Claude Code skills/agents into ONE combined file. Union their \
+    let system =
+        "You merge multiple Claude Code skills/agents into ONE combined file. Union their \
          capabilities, remove duplication, keep the clearest wording, and produce a single valid \
          file (YAML frontmatter with name + description, then the Markdown body). Return ONLY the \
          merged file content — no commentary and no code fences.";
@@ -249,7 +265,10 @@ mod tests {
 
     #[test]
     fn strips_code_fences() {
-        assert_eq!(strip_code_fences("```markdown\nhello\nworld\n```"), "hello\nworld");
+        assert_eq!(
+            strip_code_fences("```markdown\nhello\nworld\n```"),
+            "hello\nworld"
+        );
         assert_eq!(strip_code_fences("no fence"), "no fence");
     }
 
@@ -269,7 +288,10 @@ mod tests {
         let b = build_request_body(&[(1, "x".into(), "d".into())], &["Create", "Review"]);
         assert_eq!(b["model"], "gpt-4o-mini");
         assert_eq!(b["response_format"]["type"], "json_object");
-        assert!(b["messages"][0]["content"].as_str().unwrap().contains("Create, Review"));
+        assert!(b["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Create, Review"));
     }
 
     #[test]
@@ -288,7 +310,8 @@ mod tests {
 
     #[test]
     fn parse_keeps_unknown_verb() {
-        let out = parse_response(r#"{"items":[{"id":9,"object":"X","verb":"frobnicate"}]}"#).unwrap();
+        let out =
+            parse_response(r#"{"items":[{"id":9,"object":"X","verb":"frobnicate"}]}"#).unwrap();
         assert_eq!(out[0].1.verb, "frobnicate");
     }
 
@@ -306,16 +329,33 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let items = vec![
-            (1i64, "ax-form-builder".to_string(), "Generate a new D365 F&O form".to_string()),
-            (2i64, "code-reviewer".to_string(), "Review code for quality and bugs".to_string()),
+            (
+                1i64,
+                "ax-form-builder".to_string(),
+                "Generate a new D365 F&O form".to_string(),
+            ),
+            (
+                2i64,
+                "code-reviewer".to_string(),
+                "Review code for quality and bugs".to_string(),
+            ),
         ];
         let out = rt
-            .block_on(classify_batch(&reqwest::Client::new(), &key, &items, crate::taxonomy::CANONICAL_VERBS))
+            .block_on(classify_batch(
+                &reqwest::Client::new(),
+                &key,
+                &items,
+                crate::taxonomy::CANONICAL_VERBS,
+            ))
             .unwrap();
         println!("live classify: {out:?}");
         assert_eq!(out.len(), 2);
         for (_, c) in &out {
-            assert!(crate::taxonomy::CANONICAL_VERBS.contains(&c.verb.as_str()), "verb {} not canonical", c.verb);
+            assert!(
+                crate::taxonomy::CANONICAL_VERBS.contains(&c.verb.as_str()),
+                "verb {} not canonical",
+                c.verb
+            );
         }
     }
 }
