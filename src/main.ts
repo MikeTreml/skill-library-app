@@ -56,6 +56,29 @@ import {
 } from "./api";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { esc, fuzzyScore } from "./util";
+import {
+  searchEl,
+  importBtn,
+  cancelBtn,
+  classifyBtn,
+  statusEl,
+  modebarEl,
+  selbarEl,
+  dashboardEl,
+  deployEl,
+  listEl,
+  dupesEl,
+  filtersEl,
+  sourcesEl,
+  verbmapEl,
+  emptyEl,
+  detailEl,
+  paletteBtn,
+  paletteEl,
+  paletteInputEl,
+  paletteResultsEl,
+} from "./dom";
 
 const DIRECTIVES = [
   "Generalize: open it beyond a single tool or topic to broader options",
@@ -70,27 +93,6 @@ const TOOLS = [
   "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "LSP", "Bash",
   "PowerShell", "Monitor", "WebFetch", "WebSearch", "Agent", "Skill",
 ];
-
-const searchEl = document.getElementById("search") as HTMLInputElement;
-const importBtn = document.getElementById("import") as HTMLButtonElement;
-const cancelBtn = document.getElementById("cancel-import") as HTMLButtonElement;
-const classifyBtn = document.getElementById("classify") as HTMLButtonElement;
-const statusEl = document.getElementById("status")!;
-const modebarEl = document.getElementById("modebar")!;
-const selbarEl = document.getElementById("selbar")!;
-const dashboardEl = document.getElementById("dashboard")!;
-const deployEl = document.getElementById("deploy")!;
-const listEl = document.getElementById("items")!;
-const dupesEl = document.getElementById("dupes")!;
-const filtersEl = document.getElementById("filters")!;
-const sourcesEl = document.getElementById("sources")!;
-const verbmapEl = document.getElementById("verbmap")!;
-const emptyEl = document.getElementById("empty") as HTMLParagraphElement;
-const detailEl = document.getElementById("detail") as HTMLElement;
-const paletteBtn = document.getElementById("palette-btn") as HTMLButtonElement;
-const paletteEl = document.getElementById("palette") as HTMLElement;
-const paletteInputEl = document.getElementById("palette-input") as HTMLInputElement;
-const paletteResultsEl = document.getElementById("palette-results")!;
 
 type TypeFilter = "all" | "skill" | "agent";
 // "duplicates" is labeled "Triage" in the UI (clusters + untriaged queue).
@@ -127,8 +129,6 @@ const AUTO_SCAN_AFTER_MS = 5 * 60 * 1000; // 5 minutes
 let lastScanAt = Date.now();
 let onboardingOpen = false;
 
-const esc = (s: string) =>
-  s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 const itemById = (id: number) => allItems.find((i) => i.id === id);
 
 // ---------- top-bar mode switcher ----------
@@ -1482,25 +1482,7 @@ let paletteFocus = 0;
 // order (case-insensitive). Returns -1 on no match; otherwise a score that
 // rewards consecutive-char runs and matches at the start of the target or of
 // a word. Pure — no side effects.
-function fuzzyScore(query: string, target: string): number {
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  if (!q) return 0;
-  let score = 0;
-  let searchFrom = 0;
-  let prevMatch = -2;
-  for (const ch of q) {
-    const idx = t.indexOf(ch, searchFrom);
-    if (idx === -1) return -1; // chars not all present in order
-    score += 1; // base point per matched char
-    if (idx === prevMatch + 1) score += 2; // consecutive run
-    if (idx === 0) score += 3; // start of target
-    else if (!/[a-z0-9]/.test(t[idx - 1])) score += 2; // word boundary
-    prevMatch = idx;
-    searchFrom = idx + 1;
-  }
-  return score;
-}
+// fuzzyScore lives in util.ts (imported above) — pure subsequence scorer for the palette.
 
 function renderPalette() {
   const q = paletteInputEl.value.trim().toLowerCase();
